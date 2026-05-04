@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import email.utils
+import time
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -10,6 +11,7 @@ from .models import FeedItem, FeedSource, SITE_BASE_URL, SITE_NAME, tag_feed_url
 
 
 REQUEST_TIMEOUT_SECONDS = 25
+CACHE_TTL_SECONDS = 3600
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -36,16 +38,38 @@ class WikidotApiClient:
 
     def __init__(self, site_name: str = SITE_NAME):
         self.site_name = site_name
+        self._response_cache: dict[str, tuple[float, bytes]] = {}
 
-    async def fetch_source(self, source: FeedSource, limit: int = 10) -> list[FeedItem]:
-        return await self._fetch_source(source, limit)
+    async def fetch_source(
+        self,
+        source: FeedSource,
+        limit: int = 10,
+        use_cache: bool = True,
+    ) -> list[FeedItem]:
+        try:
+            import httpx
+        except ModuleNotFoundError:
+            raise WikidotApiError("httpx is not installed") from None
 
-    async def _fetch_source(self, source: FeedSource, limit: int) -> list[FeedItem]:
+        async with httpx.AsyncClient(
+            headers=REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        ) as client:
+            return await self._fetch_source(source, limit, client, use_cache)
+
+    async def _fetch_source(
+        self,
+        source: FeedSource,
+        limit: int,
+        client: Any,
+        use_cache: bool,
+    ) -> list[FeedItem]:
         items: dict[str, FeedItem] = {}
         errors: list[str] = []
 
         try:
-            for item in await self._fetch_homepage_source(source):
+            for item in await self._fetch_homepage_source(source, client, use_cache):
                 items[item.item_id] = item
         except Exception as exc:
             errors.append(str(exc))
@@ -56,14 +80,26 @@ class WikidotApiClient:
 
         for tag in source.feed_tags:
             try:
-                for item in await self._fetch_feed(tag_feed_url(tag, f"{source.key}_{tag}"), source, tag):
+                for item in await self._fetch_feed(
+                    tag_feed_url(tag, f"{source.key}_{tag}"),
+                    source,
+                    tag,
+                    client,
+                    use_cache,
+                ):
                     items[item.item_id] = item
                 continue
             except Exception as exc:
                 errors.append(str(exc))
 
             try:
-                for item in await self._fetch_tag_page(tag_page_url(tag), source, tag):
+                for item in await self._fetch_tag_page(
+                    tag_page_url(tag),
+                    source,
+                    tag,
+                    client,
+                    use_cache,
+                ):
                     items[item.item_id] = item
             except Exception as exc:
                 errors.append(str(exc))
@@ -74,8 +110,8 @@ class WikidotApiClient:
         sorted_items = sorted(items.values(), key=lambda item: item.sort_time, reverse=True)
         return sorted_items[:limit]
 
-    async def _fetch_homepage_source(self, source: FeedSource) -> list[FeedItem]:
-        body = await self._get_bytes(SITE_BASE_URL + "/", f"homepage failed for {source.key}")
+    async def _fetch_homepage_source(self, source: FeedSource, client: Any, use_cache: bool) -> list[FeedItem]:
+        body = await self._get_bytes(SITE_BASE_URL + "/", f"homepage failed for {source.key}", client, use_cache)
         return self._parse_homepage_source(body, source)
 
     def _parse_homepage_source(self, body: bytes, source: FeedSource) -> list[FeedItem]:
@@ -88,31 +124,63 @@ class WikidotApiClient:
             return [item] if item else []
         return []
 
-    async def _fetch_feed(self, url: str, source: FeedSource, tag: str) -> list[FeedItem]:
-        body = await self._get_bytes(url, f"RSS feed failed for {source.key}/{tag}")
+    async def _fetch_feed(
+        self,
+        url: str,
+        source: FeedSource,
+        tag: str,
+        client: Any,
+        use_cache: bool,
+    ) -> list[FeedItem]:
+        body = await self._get_bytes(url, f"RSS feed failed for {source.key}/{tag}", client, use_cache)
         return self._parse_feed_bytes(body, source, tag)
 
-    async def _fetch_tag_page(self, url: str, source: FeedSource, tag: str) -> list[FeedItem]:
-        body = await self._get_bytes(url, f"tag page failed for {source.key}/{tag}")
+    async def _fetch_tag_page(
+        self,
+        url: str,
+        source: FeedSource,
+        tag: str,
+        client: Any,
+        use_cache: bool,
+    ) -> list[FeedItem]:
+        body = await self._get_bytes(url, f"tag page failed for {source.key}/{tag}", client, use_cache)
         return self._parse_tag_page(body, source, tag)
 
-    async def _get_bytes(self, url: str, error_prefix: str) -> bytes:
-        try:
-            import httpx
-        except ModuleNotFoundError:
-            raise WikidotApiError(f"{error_prefix}: httpx is not installed") from None
+    async def _get_bytes(self, url: str, error_prefix: str, client: Any, use_cache: bool) -> bytes:
+        if use_cache and (cached := self._cached_bytes(url)) is not None:
+            return cached
 
         try:
-            async with httpx.AsyncClient(
-                headers=REQUEST_HEADERS,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-                follow_redirects=True,
-            ) as client:
-                response = await client.get(url)
+            response = await client.get(url)
             response.raise_for_status()
         except Exception as exc:
             raise WikidotApiError(f"{error_prefix}: {exc}") from exc
+        if use_cache:
+            self._cache_bytes(url, response.content)
         return response.content
+
+    def _cached_bytes(self, url: str) -> bytes | None:
+        cached = self._response_cache.get(url)
+        if not cached:
+            return None
+
+        expires_at, body = cached
+        if expires_at > time.monotonic():
+            return body
+
+        self._response_cache.pop(url, None)
+        return None
+
+    def _cache_bytes(self, url: str, body: bytes) -> None:
+        now = time.monotonic()
+        expires_at = now + CACHE_TTL_SECONDS
+        self._response_cache[url] = (expires_at, body)
+        self._prune_cache(now)
+
+    def _prune_cache(self, now: float) -> None:
+        for url, (expires_at, _) in list(self._response_cache.items()):
+            if expires_at <= now:
+                self._response_cache.pop(url, None)
 
     def _parse_feed_bytes(self, body: bytes, source: FeedSource, tag: str) -> list[FeedItem]:
         try:

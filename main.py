@@ -188,7 +188,11 @@ class ScpCnFeedPlugin(Star):
             return
 
         try:
-            fetched = await self.service.fetch_many(source_keys, limit=MAX_ITEMS_PER_SOURCE)
+            fetched = await self.service.fetch_many(
+                source_keys,
+                limit=MAX_ITEMS_PER_SOURCE,
+                use_cache=False,
+            )
         except WikidotApiError as exc:
             yield event.plain_result(f"检查失败：{exc}")
             return

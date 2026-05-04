@@ -10,14 +10,24 @@ class FeedService:
         self.store = store
         self.client = client
 
-    async def fetch_source(self, source: FeedSource, limit: int = 10) -> list[FeedItem]:
-        return await self.client.fetch_source(source, limit=limit)
+    async def fetch_source(
+        self,
+        source: FeedSource,
+        limit: int = 10,
+        use_cache: bool = True,
+    ) -> list[FeedItem]:
+        return await self.client.fetch_source(source, limit=limit, use_cache=use_cache)
 
-    async def fetch_many(self, source_keys: set[str], limit: int = 10) -> dict[str, list[FeedItem]]:
+    async def fetch_many(
+        self,
+        source_keys: set[str],
+        limit: int = 10,
+        use_cache: bool = True,
+    ) -> dict[str, list[FeedItem]]:
         result: dict[str, list[FeedItem]] = {}
         for key in source_keys:
             source = SOURCES[key]
-            result[key] = await self.fetch_source(source, limit=limit)
+            result[key] = await self.fetch_source(source, limit=limit, use_cache=use_cache)
         return result
 
     async def baseline_sources(self, origin: str, source_keys: set[str], limit: int = 30) -> int:
