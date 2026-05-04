@@ -1,0 +1,7 @@
+name: astrbot_plugin_scp_cn_feed
+display_name: SCP-CN Feed
+author: yun
+desc: 推送 SCP 中文站精品 SCP、精品原创故事和竞赛相关新闻。
+version: 0.1.3
+repo: "https://github.com/yun474/astrbot_plugin_scp_cn_feed"
+astrbot_version: ">=4.16"
