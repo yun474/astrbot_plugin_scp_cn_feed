@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import email.utils
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from .models import FeedItem, FeedSource, SITE_BASE_URL, SITE_NAME, tag_feed_url, tag_page_url
@@ -40,14 +38,14 @@ class WikidotApiClient:
         self.site_name = site_name
 
     async def fetch_source(self, source: FeedSource, limit: int = 10) -> list[FeedItem]:
-        return await asyncio.to_thread(self._fetch_source_sync, source, limit)
+        return await self._fetch_source(source, limit)
 
-    def _fetch_source_sync(self, source: FeedSource, limit: int) -> list[FeedItem]:
+    async def _fetch_source(self, source: FeedSource, limit: int) -> list[FeedItem]:
         items: dict[str, FeedItem] = {}
         errors: list[str] = []
 
         try:
-            for item in self._fetch_homepage_source(source):
+            for item in await self._fetch_homepage_source(source):
                 items[item.item_id] = item
         except Exception as exc:
             errors.append(str(exc))
@@ -58,14 +56,14 @@ class WikidotApiClient:
 
         for tag in source.feed_tags:
             try:
-                for item in self._fetch_feed(tag_feed_url(tag, f"{source.key}_{tag}"), source, tag):
+                for item in await self._fetch_feed(tag_feed_url(tag, f"{source.key}_{tag}"), source, tag):
                     items[item.item_id] = item
                 continue
             except Exception as exc:
                 errors.append(str(exc))
 
             try:
-                for item in self._fetch_tag_page(tag_page_url(tag), source, tag):
+                for item in await self._fetch_tag_page(tag_page_url(tag), source, tag):
                     items[item.item_id] = item
             except Exception as exc:
                 errors.append(str(exc))
@@ -76,8 +74,8 @@ class WikidotApiClient:
         sorted_items = sorted(items.values(), key=lambda item: item.sort_time, reverse=True)
         return sorted_items[:limit]
 
-    def _fetch_homepage_source(self, source: FeedSource) -> list[FeedItem]:
-        body = self._get_bytes(SITE_BASE_URL + "/", f"homepage failed for {source.key}")
+    async def _fetch_homepage_source(self, source: FeedSource) -> list[FeedItem]:
+        body = await self._get_bytes(SITE_BASE_URL + "/", f"homepage failed for {source.key}")
         return self._parse_homepage_source(body, source)
 
     def _parse_homepage_source(self, body: bytes, source: FeedSource) -> list[FeedItem]:
@@ -90,34 +88,31 @@ class WikidotApiClient:
             return [item] if item else []
         return []
 
-    def _fetch_feed(self, url: str, source: FeedSource, tag: str) -> list[FeedItem]:
-        body = self._get_bytes(url, f"RSS feed failed for {source.key}/{tag}")
+    async def _fetch_feed(self, url: str, source: FeedSource, tag: str) -> list[FeedItem]:
+        body = await self._get_bytes(url, f"RSS feed failed for {source.key}/{tag}")
         return self._parse_feed_bytes(body, source, tag)
 
-    def _fetch_tag_page(self, url: str, source: FeedSource, tag: str) -> list[FeedItem]:
-        body = self._get_bytes(url, f"tag page failed for {source.key}/{tag}")
+    async def _fetch_tag_page(self, url: str, source: FeedSource, tag: str) -> list[FeedItem]:
+        body = await self._get_bytes(url, f"tag page failed for {source.key}/{tag}")
         return self._parse_tag_page(body, source, tag)
 
-    def _get_bytes(self, url: str, error_prefix: str) -> bytes:
+    async def _get_bytes(self, url: str, error_prefix: str) -> bytes:
         try:
-            import requests
+            import httpx
         except ModuleNotFoundError:
-            return self._get_bytes_with_urllib(url, error_prefix)
+            raise WikidotApiError(f"{error_prefix}: httpx is not installed") from None
 
         try:
-            response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
+            async with httpx.AsyncClient(
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                follow_redirects=True,
+            ) as client:
+                response = await client.get(url)
             response.raise_for_status()
         except Exception as exc:
             raise WikidotApiError(f"{error_prefix}: {exc}") from exc
         return response.content
-
-    def _get_bytes_with_urllib(self, url: str, error_prefix: str) -> bytes:
-        request = Request(url, headers=REQUEST_HEADERS)
-        try:
-            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                return response.read()
-        except Exception as exc:
-            raise WikidotApiError(f"{error_prefix}: {exc}") from exc
 
     def _parse_feed_bytes(self, body: bytes, source: FeedSource, tag: str) -> list[FeedItem]:
         try:

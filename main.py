@@ -8,7 +8,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .scp_cn_feed.models import ALIASES, SOURCES, FeedItem
@@ -26,13 +26,6 @@ SOURCE_ORDER = ("featured_scp", "featured_tale", "contests")
 PLUGIN_NAME = "astrbot_plugin_scp_cn_feed"
 
 
-@register(
-    "astrbot_plugin_scp_cn_feed",
-    "SCP_079",
-    "推送 SCP 中文站精品 SCP、精品原创故事和竞赛相关新闻",
-    "0.1.3",
-    "",
-)
 class ScpCnFeedPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -139,13 +132,13 @@ class ScpCnFeedPlugin(Star):
         except WikidotApiError as exc:
             logger.warning(f"SCP-CN baseline failed: {exc}")
             yield event.plain_result(
-                "订阅已保存，但建立基线失败。下一次检查可能会出现历史内容。\n"
+                "订阅已保存，但建立基线失败。下一次成功检查会先记录当前最新内容，避免推送历史内容。\n"
                 f"错误：{exc}"
             )
             return
 
         names = "、".join(SOURCES[key].title for key in sorted(source_keys))
-        yield event.plain_result(f"已订阅：{names}\n已记录 {count} 条当前内容作为基线，后续只推新增。")
+        yield event.plain_result(f"已订阅：{names}\n已抓取 {count} 条当前内容，并按来源记录最新内容作为基线，后续只推新增。")
 
     @scpfeed.command("取消")
     async def unsubscribe(self, event: AstrMessageEvent, source_name: str):
@@ -181,7 +174,7 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(f"建立基线失败：{exc}")
             return
 
-        yield event.plain_result(f"已记录 {count} 条当前内容作为基线。")
+        yield event.plain_result(f"已抓取 {count} 条当前内容，并按来源记录最新内容作为基线。")
 
     @scpfeed.command("检查")
     async def check(self, event: AstrMessageEvent, source_name: str):
@@ -202,17 +195,16 @@ class ScpCnFeedPlugin(Star):
 
         origin = event.unified_msg_origin
         messages: list[str] = []
-        seen_ids: list[str] = []
         for source_key in sorted(fetched):
-            new_items = self.service.only_new(origin, fetched[source_key])
+            items = fetched[source_key]
+            new_items = self.service.only_new(origin, source_key, items)
             if not new_items:
                 messages.append(f"{SOURCES[source_key].title}：暂无新增。")
+                self.service.mark_latest(origin, source_key, items)
                 continue
             messages.append(self._format_push(SOURCES[source_key].title, new_items))
-            seen_ids.extend(item.item_id for item in new_items)
+            self.service.mark_latest(origin, source_key, items)
 
-        if seen_ids:
-            self.store.mark_seen(origin, seen_ids)
         yield event.plain_result("\n\n".join(messages))
 
     @scpfeed.command("日报")
@@ -272,18 +264,15 @@ class ScpCnFeedPlugin(Star):
 
         for origin, subscribed_sources in subscriptions.items():
             parts: list[str] = []
-            seen_ids: list[str] = []
             for source_key in sorted(subscribed_sources):
-                new_items = self.service.only_new(origin, fetched.get(source_key, []))
+                items = fetched.get(source_key, [])
+                new_items = self.service.only_new(origin, source_key, items)
+                self.service.mark_latest(origin, source_key, items)
                 if not new_items:
                     continue
                 parts.append(self._format_push(SOURCES[source_key].title, new_items))
-                seen_ids.extend(item.item_id for item in new_items)
             if parts:
                 await self.context.send_message(origin, MessageChain().message("\n\n".join(parts)))
-
-            if seen_ids:
-                self.store.mark_seen(origin, seen_ids)
 
     def _resolve_sources(self, source_name: str) -> set[str]:
         source_key = ALIASES.get(source_name.strip().lower())

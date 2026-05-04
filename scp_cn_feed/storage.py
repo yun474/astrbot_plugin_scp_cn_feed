@@ -33,6 +33,7 @@ class FeedStore:
                 subscriptions[origin] = sorted(sources)
             else:
                 subscriptions.pop(origin, None)
+            self._cleanup_state()
             self.save()
 
     def subscriptions_for(self, origin: str) -> set[str]:
@@ -46,19 +47,20 @@ class FeedStore:
                 for origin, sources in self._state.get("subscriptions", {}).items()
             }
 
-    def mark_seen(self, origin: str, item_ids: list[str]) -> None:
-        if not item_ids:
+    def latest_item_id(self, origin: str, source_key: str) -> str | None:
+        with self._lock:
+            value = self._state.get("latest_by_origin", {}).get(origin, {}).get(source_key)
+            return str(value) if value else None
+
+    def mark_latest(self, origin: str, source_key: str, item_id: str | None) -> None:
+        if not item_id:
             return
         with self._lock:
-            seen_by_origin = self._state.setdefault("seen_by_origin", {})
-            seen = set(seen_by_origin.get(origin, []))
-            seen.update(item_ids)
-            seen_by_origin[origin] = sorted(seen)
+            latest_by_origin = self._state.setdefault("latest_by_origin", {})
+            latest_by_source = latest_by_origin.setdefault(origin, {})
+            latest_by_source[source_key] = item_id
+            self._cleanup_state()
             self.save()
-
-    def is_seen(self, origin: str, item_id: str) -> bool:
-        with self._lock:
-            return item_id in set(self._state.get("seen_by_origin", {}).get(origin, []))
 
     def save(self) -> None:
         with self._lock:
@@ -86,28 +88,47 @@ class FeedStore:
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"subscriptions": {}, "seen_by_origin": {}}
+            return {"subscriptions": {}, "latest_by_origin": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return {"subscriptions": {}, "seen_by_origin": {}}
+            return {"subscriptions": {}, "latest_by_origin": {}}
         data.setdefault("subscriptions", {})
-        data.setdefault("seen_by_origin", {})
-        self._migrate_legacy_seen(data)
+        data.setdefault("latest_by_origin", {})
+        self._cleanup_loaded_state(data)
         return data
 
-    def _migrate_legacy_seen(self, data: dict[str, Any]) -> None:
-        legacy_seen = data.get("seen")
-        seen_by_origin = data.get("seen_by_origin")
-        if not isinstance(legacy_seen, list) or seen_by_origin:
-            return
+    def _cleanup_state(self) -> None:
+        self._cleanup_loaded_state(self._state)
 
-        subscriptions = data.get("subscriptions", {})
+    def _cleanup_loaded_state(self, data: dict[str, Any]) -> None:
+        subscriptions = data.setdefault("subscriptions", {})
+        latest_by_origin = data.setdefault("latest_by_origin", {})
+
         if not isinstance(subscriptions, dict):
-            return
+            data["subscriptions"] = {}
+            subscriptions = data["subscriptions"]
+        if not isinstance(latest_by_origin, dict):
+            data["latest_by_origin"] = {}
+            latest_by_origin = data["latest_by_origin"]
 
-        data["seen_by_origin"] = {
-            origin: sorted(set(legacy_seen))
-            for origin in subscriptions
-        }
+        for origin in list(latest_by_origin):
+            subscribed_sources = set(subscriptions.get(origin, []))
+            if not subscribed_sources:
+                latest_by_origin.pop(origin, None)
+                continue
+
+            latest_by_source = latest_by_origin.get(origin)
+            if not isinstance(latest_by_source, dict):
+                latest_by_origin.pop(origin, None)
+                continue
+
+            for source_key in list(latest_by_source):
+                if source_key not in subscribed_sources or not latest_by_source[source_key]:
+                    latest_by_source.pop(source_key, None)
+
+            if not latest_by_source:
+                latest_by_origin.pop(origin, None)
+
         data.pop("seen", None)
+        data.pop("seen_by_origin", None)

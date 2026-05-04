@@ -22,11 +22,23 @@ class FeedService:
 
     async def baseline_sources(self, origin: str, source_keys: set[str], limit: int = 30) -> int:
         total = 0
-        for items in (await self.fetch_many(source_keys, limit=limit)).values():
-            ids = [item.item_id for item in items]
-            total += len(ids)
-            self.store.mark_seen(origin, ids)
+        for source_key, items in (await self.fetch_many(source_keys, limit=limit)).items():
+            total += len(items)
+            self.mark_latest(origin, source_key, items)
         return total
 
-    def only_new(self, origin: str, items: list[FeedItem]) -> list[FeedItem]:
-        return [item for item in items if not self.store.is_seen(origin, item.item_id)]
+    def only_new(self, origin: str, source_key: str, items: list[FeedItem]) -> list[FeedItem]:
+        latest_item_id = self.store.latest_item_id(origin, source_key)
+        if not latest_item_id:
+            return []
+
+        new_items: list[FeedItem] = []
+        for item in items:
+            if item.item_id == latest_item_id:
+                break
+            new_items.append(item)
+        return new_items
+
+    def mark_latest(self, origin: str, source_key: str, items: list[FeedItem]) -> None:
+        if items:
+            self.store.mark_latest(origin, source_key, items[0].item_id)
