@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import email.utils
 import time
+from datetime import timezone
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -311,6 +312,8 @@ def _parse_rss_datetime(value: str | None) -> str | None:
         parsed = email.utils.parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.isoformat()
 
 

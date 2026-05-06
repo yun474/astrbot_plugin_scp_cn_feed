@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -89,12 +89,15 @@ def _to_str_or_none(value: Any) -> str | None:
 
 def _parse_wikidot_time(value: str | None) -> datetime:
     if not value:
-        return datetime.min
+        return datetime.min.replace(tzinfo=timezone.utc)
     normalized = value.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
-        return datetime.min
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 SOURCES: dict[str, FeedSource] = {

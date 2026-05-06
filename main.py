@@ -226,15 +226,21 @@ class ScpCnFeedPlugin(Star):
         sections: dict[str, list[FeedItem]] = {}
         errors: dict[str, str] = {}
 
-        for source_key in SOURCE_ORDER:
+        async def fetch_section(source_key: str) -> tuple[str, list[FeedItem], str | None]:
             try:
-                sections[source_key] = await self.service.fetch_source(
+                items = await self.service.fetch_source(
                     SOURCES[source_key],
                     limit=DAILY_REPORT_ITEMS_PER_SOURCE,
                 )
+                return source_key, items, None
             except WikidotApiError as exc:
-                sections[source_key] = []
-                errors[source_key] = str(exc)
+                return source_key, [], str(exc)
+
+        results = await asyncio.gather(*(fetch_section(source_key) for source_key in SOURCE_ORDER))
+        for source_key, items, error in results:
+            sections[source_key] = items
+            if error:
+                errors[source_key] = error
 
         yield event.plain_result(self._format_daily_report(sections, errors))
 
