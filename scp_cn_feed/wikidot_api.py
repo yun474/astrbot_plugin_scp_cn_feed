@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import email.utils
 import time
 from html.parser import HTMLParser
@@ -7,6 +8,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
+import httpx
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import fromstring as parse_xml
 
@@ -15,6 +17,7 @@ from .models import FeedItem, FeedSource, SITE_BASE_URL, SITE_NAME, tag_feed_url
 
 REQUEST_TIMEOUT_SECONDS = 25
 CACHE_TTL_SECONDS = 3600
+MAX_CACHE_ENTRIES = 64
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -41,7 +44,13 @@ class WikidotApiClient:
 
     def __init__(self, site_name: str = SITE_NAME):
         self.site_name = site_name
-        self._response_cache: dict[str, tuple[float, bytes]] = {}
+        self._response_cache: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
+        self._client: httpx.AsyncClient | None = None
+
+    async def close(self) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
     async def fetch_source(
         self,
@@ -49,17 +58,16 @@ class WikidotApiClient:
         limit: int = 10,
         use_cache: bool = True,
     ) -> list[FeedItem]:
-        try:
-            import httpx
-        except ModuleNotFoundError:
-            raise WikidotApiError("httpx is not installed") from None
+        return await self._fetch_source(source, limit, self._get_client(), use_cache)
 
-        async with httpx.AsyncClient(
-            headers=REQUEST_HEADERS,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            follow_redirects=True,
-        ) as client:
-            return await self._fetch_source(source, limit, client, use_cache)
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                follow_redirects=True,
+            )
+        return self._client
 
     async def _fetch_source(
         self,
@@ -169,6 +177,7 @@ class WikidotApiClient:
 
         expires_at, body = cached
         if expires_at > time.monotonic():
+            self._response_cache.move_to_end(url)
             return body
 
         self._response_cache.pop(url, None)
@@ -178,12 +187,15 @@ class WikidotApiClient:
         now = time.monotonic()
         expires_at = now + CACHE_TTL_SECONDS
         self._response_cache[url] = (expires_at, body)
+        self._response_cache.move_to_end(url)
         self._prune_cache(now)
 
     def _prune_cache(self, now: float) -> None:
         for url, (expires_at, _) in list(self._response_cache.items()):
             if expires_at <= now:
                 self._response_cache.pop(url, None)
+        while len(self._response_cache) > MAX_CACHE_ENTRIES:
+            self._response_cache.popitem(last=False)
 
     def _parse_feed_bytes(self, body: bytes, source: FeedSource, tag: str) -> list[FeedItem]:
         try:

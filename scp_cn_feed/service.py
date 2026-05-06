@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from .models import FeedItem, FeedSource, SOURCES
 from .storage import FeedStore
 from .wikidot_api import WikidotApiClient
@@ -18,17 +20,21 @@ class FeedService:
     ) -> list[FeedItem]:
         return await self.client.fetch_source(source, limit=limit, use_cache=use_cache)
 
+    async def close(self) -> None:
+        await self.client.close()
+
     async def fetch_many(
         self,
         source_keys: set[str],
         limit: int = 10,
         use_cache: bool = True,
     ) -> dict[str, list[FeedItem]]:
-        result: dict[str, list[FeedItem]] = {}
-        for key in source_keys:
+        async def fetch_one(key: str) -> tuple[str, list[FeedItem]]:
             source = SOURCES[key]
-            result[key] = await self.fetch_source(source, limit=limit, use_cache=use_cache)
-        return result
+            return key, await self.fetch_source(source, limit=limit, use_cache=use_cache)
+
+        pairs = await asyncio.gather(*(fetch_one(key) for key in sorted(source_keys)))
+        return dict(pairs)
 
     async def baseline_sources(self, origin: str, source_keys: set[str], limit: int = 30) -> int:
         total = 0

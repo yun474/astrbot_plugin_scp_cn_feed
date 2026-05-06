@@ -244,6 +244,7 @@ class ScpCnFeedPlugin(Star):
                 await self._task
             except asyncio.CancelledError:
                 pass
+        await self.service.close()
 
     async def _poll_loop(self):
         await asyncio.sleep(10)
