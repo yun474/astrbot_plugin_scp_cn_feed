@@ -21,6 +21,7 @@ MIN_POLL_INTERVAL_DAYS = 1
 SECONDS_PER_DAY = 86400
 MAX_ITEMS_PER_SOURCE = 5
 DAILY_REPORT_ITEMS_PER_SOURCE = 5
+PUSH_SEND_INTERVAL_SECONDS = 1.0
 SOURCE_ORDER = ("featured_scp", "featured_tale", "contests")
 PLUGIN_NAME = "astrbot_plugin_scp_cn_feed"
 
@@ -274,18 +275,24 @@ class ScpCnFeedPlugin(Star):
 
         for origin, subscribed_sources in subscriptions.items():
             parts: list[str] = []
+            latest_updates: list[tuple[str, list[FeedItem]]] = []
             for source_key in sorted(subscribed_sources):
                 items = fetched.get(source_key, [])
                 new_items = self.service.only_new(origin, source_key, items)
-                self.service.mark_latest(origin, source_key, items)
                 if not new_items:
+                    self.service.mark_latest(origin, source_key, items)
                     continue
                 parts.append(self._format_push(SOURCES[source_key].title, new_items))
+                latest_updates.append((source_key, items))
             if parts:
                 try:
                     await self.context.send_message(origin, MessageChain().message("\n\n".join(parts)))
                 except Exception as exc:
                     logger.warning(f"SCP-CN feed push failed for {origin}: {exc}")
+                else:
+                    for source_key, items in latest_updates:
+                        self.service.mark_latest(origin, source_key, items)
+                await asyncio.sleep(PUSH_SEND_INTERVAL_SECONDS)
 
     def _resolve_sources(self, source_name: str) -> set[str]:
         source_key = ALIASES.get(source_name.strip().lower())
