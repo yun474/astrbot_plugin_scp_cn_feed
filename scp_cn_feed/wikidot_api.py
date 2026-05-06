@@ -34,6 +34,15 @@ class WikidotApiError(RuntimeError):
     pass
 
 
+EXPECTED_FETCH_ERRORS = (
+    WikidotApiError,
+    ValueError,
+    UnicodeError,
+    DefusedXmlException,
+    ElementTree.ParseError,
+)
+
+
 class WikidotApiClient:
     """Read public Wikidot RSS feeds with a lightweight tag-page fallback.
 
@@ -82,7 +91,7 @@ class WikidotApiClient:
         try:
             for item in await self._fetch_homepage_source(source, client, use_cache):
                 items[item.item_id] = item
-        except Exception as exc:
+        except EXPECTED_FETCH_ERRORS as exc:
             errors.append(str(exc))
 
         if items:
@@ -100,7 +109,7 @@ class WikidotApiClient:
                 ):
                     items[item.item_id] = item
                 continue
-            except Exception as exc:
+            except EXPECTED_FETCH_ERRORS as exc:
                 errors.append(str(exc))
 
             try:
@@ -112,7 +121,7 @@ class WikidotApiClient:
                     use_cache,
                 ):
                     items[item.item_id] = item
-            except Exception as exc:
+            except EXPECTED_FETCH_ERRORS as exc:
                 errors.append(str(exc))
 
         if not items and errors:
@@ -164,7 +173,7 @@ class WikidotApiClient:
         try:
             response = await client.get(url)
             response.raise_for_status()
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             raise WikidotApiError(f"{error_prefix}: {exc}") from exc
         if use_cache:
             self._cache_bytes(url, response.content)

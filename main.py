@@ -282,7 +282,10 @@ class ScpCnFeedPlugin(Star):
                     continue
                 parts.append(self._format_push(SOURCES[source_key].title, new_items))
             if parts:
-                await self.context.send_message(origin, MessageChain().message("\n\n".join(parts)))
+                try:
+                    await self.context.send_message(origin, MessageChain().message("\n\n".join(parts)))
+                except Exception as exc:
+                    logger.warning(f"SCP-CN feed push failed for {origin}: {exc}")
 
     def _resolve_sources(self, source_name: str) -> set[str]:
         source_key = ALIASES.get(source_name.strip().lower())
