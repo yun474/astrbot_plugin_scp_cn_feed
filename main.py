@@ -8,8 +8,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.star import Context, Star
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.api.star import Context, Star, StarTools
 
 from .scp_cn_feed.models import ALIASES, SOURCES, FeedItem
 from .scp_cn_feed.service import FeedService
@@ -32,10 +31,10 @@ class ScpCnFeedPlugin(Star):
         self.config = config or {}
         self.store = FeedStore(self._state_path())
         self.service = FeedService(self.store, WikidotApiClient())
-        self._task = asyncio.create_task(self._poll_loop())
+        self._task: asyncio.Task[None] | None = None
 
     def _state_path(self) -> Path:
-        plugin_data_path = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
+        plugin_data_path = StarTools.get_data_dir(PLUGIN_NAME)
         state_path = plugin_data_path / "state.json"
         legacy_state_path = Path(__file__).resolve().parent / "data" / "state.json"
         if not state_path.exists() and legacy_state_path.exists():
@@ -51,6 +50,12 @@ class ScpCnFeedPlugin(Star):
                     with suppress(OSError):
                         temp_path.unlink()
         return state_path
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self):
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._poll_loop())
 
     @filter.command_group("scpfeed")
     async def scpfeed(self, event: AstrMessageEvent):

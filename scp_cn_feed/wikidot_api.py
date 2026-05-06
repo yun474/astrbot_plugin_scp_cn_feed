@@ -7,6 +7,9 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as parse_xml
+
 from .models import FeedItem, FeedSource, SITE_BASE_URL, SITE_NAME, tag_feed_url, tag_page_url
 
 
@@ -184,8 +187,8 @@ class WikidotApiClient:
 
     def _parse_feed_bytes(self, body: bytes, source: FeedSource, tag: str) -> list[FeedItem]:
         try:
-            root = ElementTree.fromstring(body)
-        except ElementTree.ParseError as exc:
+            root = parse_xml(body)
+        except (ElementTree.ParseError, DefusedXmlException) as exc:
             raise WikidotApiError(f"RSS feed parse failed for {source.key}/{tag}: {exc}") from exc
 
         result: list[FeedItem] = []
