@@ -477,10 +477,12 @@ class ScpCnFeedPlugin(Star):
                 lines = [f"SCP-CN {source.title}：", item.title]
             else:
                 lines = [f"SCP-CN {source.title}：{item.title}"]
-            if item.summary:
-                lines.append(self._compact_summary(item))
             if source_key in {"featured_scp", "featured_tale"}:
+                if item.summary:
+                    lines.append(self._compact_summary(item))
                 lines.append(f"原文：{item.url}")
+            elif source_key == "contests":
+                lines.append(f"竞赛链接：{item.url}")
             blocks.append("\n".join(lines))
         return "\n\n".join(blocks)
 
