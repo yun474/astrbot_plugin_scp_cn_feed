@@ -230,7 +230,7 @@ class ScpCnFeedPlugin(Star):
                         new_items,
                     )
                     yield event.plain_result(
-                        f"SCP-CN {SOURCES[source_key].title}更新：检测到 {len(new_items)} 条新增，网页截图如下。"
+                        self._format_screenshot_notice(source_key, new_items, "网页截图如下。", is_update=True)
                     )
                     yield event.image_result(str(image_path))
                 except FeedRenderError as exc:
@@ -288,8 +288,7 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(f"截图失败：{exc}")
             return
 
-        item = items[0]
-        yield event.plain_result(f"SCP-CN {source.title}：{item.title}")
+        yield event.plain_result(self._format_screenshot_notice(source_key, items, "网页截图如下。"))
         yield event.image_result(str(image_path))
 
     @scpfeed.command("日报")
@@ -392,7 +391,14 @@ class ScpCnFeedPlugin(Star):
                             new_items,
                         )
                         image_components.append(
-                            Plain(f"SCP-CN {SOURCES[source_key].title}更新：检测到 {len(new_items)} 条新增。\n")
+                            Plain(
+                                self._format_screenshot_notice(
+                                    source_key,
+                                    new_items,
+                                    "网页截图如下。",
+                                    is_update=True,
+                                ) + "\n"
+                            )
                         )
                         image_components.append(Image.fromFileSystem(str(image_path)))
                     except FeedRenderError as exc:
@@ -459,6 +465,28 @@ class ScpCnFeedPlugin(Star):
         if components:
             return MessageChain(components)
         return MessageChain()
+
+    def _format_screenshot_notice(
+        self,
+        source_key: str,
+        items: list[FeedItem],
+        suffix: str,
+        is_update: bool = False,
+    ) -> str:
+        source = SOURCES[source_key]
+        if is_update:
+            lines = [f"SCP-CN {source.title}更新：检测到 {len(items)} 条新增，{suffix}"]
+        elif items:
+            lines = [f"SCP-CN {source.title}：{items[0].title}", suffix]
+        else:
+            lines = [f"SCP-CN {source.title}：{suffix}"]
+        if source_key in {"featured_scp", "featured_tale"}:
+            if is_update:
+                for item in items:
+                    lines.append(f"{item.title}\n原文：{item.url}")
+            elif items:
+                lines.append(f"原文：{items[0].url}")
+        return "\n".join(lines)
 
     def _resolve_sources(self, source_name: str) -> set[str]:
         source_key = ALIASES.get(source_name.strip().lower())
