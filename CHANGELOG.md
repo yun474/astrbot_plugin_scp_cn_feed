@@ -1,8 +1,8 @@
-# Changelog
+# 更新日志
 
 ## 0.2.0 - 2026-06-04
 
-- Added Playwright-based image rendering for `/scpfeed 日报`.
-- Added webpage-region screenshots for SCP-CN update pushes and manual checks.
-- Improved contest parsing so contest names and linked text are shown correctly.
-- Added render configuration options and text fallback when screenshots fail.
+- `/scpfeed 日报` 改为使用本地 Playwright 渲染 HTML 图片卡片。
+- 自动推送和手动检查新增内容时，支持截图 SCP 中文站真实网页区域。
+- 优化竞赛信息解析，竞赛名和正文中的链接文字会正确显示并高亮。
+- 新增渲染相关配置，并在截图失败时自动回退为文本消息。
