@@ -74,6 +74,12 @@ astrbot_plugin_scp_cn_feed/
 /scpfeed 检查 全部
 ```
 
+主动截图某个来源当前内容：
+
+```text
+/scpfeed 截图 竞赛
+```
+
 取消订阅：
 
 ```text
@@ -90,6 +96,7 @@ astrbot_plugin_scp_cn_feed/
 /scpfeed 订阅 <全部|精品scp|精品原创故事|竞赛>
 /scpfeed 取消 <全部|精品scp|精品原创故事|竞赛>
 /scpfeed 检查 <全部|精品scp|精品原创故事|竞赛>
+/scpfeed 截图 <精品scp|精品原创故事|竞赛>
 /scpfeed 基线 <全部|精品scp|精品原创故事|竞赛>
 ```
 
@@ -100,6 +107,7 @@ astrbot_plugin_scp_cn_feed/
 /scpfeed 订阅 精品原创故事
 /scpfeed 订阅 竞赛
 /scpfeed 检查 竞赛
+/scpfeed 截图 精品scp
 ```
 
 ## 配置方法
@@ -241,5 +249,6 @@ https://scp-wiki-cn.wikidot.com/
 
 - `/scpfeed 日报` 改为使用本地 Playwright 渲染 HTML 图片卡片。
 - 自动推送和手动检查新增内容时，支持截图 SCP 中文站真实网页区域。
+- 新增 `/scpfeed 截图 <来源>`，可主动截取单个来源当前内容的网页区域。
 - 优化竞赛信息解析，竞赛名和正文中的链接文字会正确显示并高亮。
 - 新增渲染相关配置，并在截图失败时自动回退为文本消息。

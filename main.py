@@ -85,6 +85,7 @@ class ScpCnFeedPlugin(Star):
             "/scpfeed 订阅 <全部|精品scp|精品原创故事|竞赛>\n"
             "/scpfeed 取消 <全部|精品scp|精品原创故事|竞赛>\n"
             "/scpfeed 检查 <全部|精品scp|精品原创故事|竞赛>\n"
+            "/scpfeed 截图 <精品scp|精品原创故事|竞赛>\n"
             "/scpfeed 日报\n"
             "/scpfeed 基线 <全部|精品scp|精品原创故事|竞赛>\n"
             "/scpfeed 状态\n"
@@ -244,6 +245,52 @@ class ScpCnFeedPlugin(Star):
 
         if messages:
             yield event.plain_result("\n\n".join(messages))
+
+    @scpfeed.command("截图")
+    async def screenshot(self, event: AstrMessageEvent, source_name: str):
+        """主动截取一个 SCP-CN 来源当前内容的网页区域。"""
+        if blocked_text := self._blocked_text(event):
+            yield event.plain_result(blocked_text)
+            return
+        source_keys = self._resolve_sources(source_name)
+        if len(source_keys) != 1:
+            yield event.plain_result(
+                f"截图只支持单个来源：{source_name}\n"
+                "可用来源：精品scp、精品原创故事、竞赛"
+            )
+            return
+
+        source_key = next(iter(source_keys))
+        source = SOURCES[source_key]
+        try:
+            items = await self.service.fetch_source(
+                source,
+                limit=1,
+                use_cache=False,
+            )
+        except WikidotApiError as exc:
+            yield event.plain_result(f"截图失败，获取 {source.title} 内容失败：{exc}")
+            return
+
+        if not items:
+            yield event.plain_result(f"截图失败，{source.title} 暂无可用内容。")
+            return
+
+        try:
+            self.renderer.prune_old_files()
+            image_path = await self.renderer.render_update_screenshot(source, items)
+        except FeedRenderError as exc:
+            logger.warning(f"SCP-CN manual screenshot failed for {source_key}: {exc}")
+            yield event.plain_result(f"截图失败：{exc}")
+            return
+        except Exception as exc:
+            logger.warning(f"SCP-CN manual screenshot crashed for {source_key}: {exc}")
+            yield event.plain_result(f"截图失败：{exc}")
+            return
+
+        item = items[0]
+        yield event.plain_result(f"SCP-CN {source.title}：{item.title}")
+        yield event.image_result(str(image_path))
 
     @scpfeed.command("日报")
     async def daily_report(self, event: AstrMessageEvent):
