@@ -229,9 +229,7 @@ class ScpCnFeedPlugin(Star):
                         SOURCES[source_key],
                         new_items,
                     )
-                    yield event.plain_result(
-                        self._format_screenshot_notice(source_key, new_items, "网页截图如下。", is_update=True)
-                    )
+                    yield event.plain_result(self._format_screenshot_notice(source_key, new_items))
                     yield event.image_result(str(image_path))
                 except FeedRenderError as exc:
                     logger.warning(f"SCP-CN update screenshot failed for {source_key}: {exc}")
@@ -288,7 +286,7 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(f"截图失败：{exc}")
             return
 
-        yield event.plain_result(self._format_screenshot_notice(source_key, items, "网页截图如下。"))
+        yield event.plain_result(self._format_screenshot_notice(source_key, items))
         yield event.image_result(str(image_path))
 
     @scpfeed.command("日报")
@@ -395,8 +393,6 @@ class ScpCnFeedPlugin(Star):
                                 self._format_screenshot_notice(
                                     source_key,
                                     new_items,
-                                    "网页截图如下。",
-                                    is_update=True,
                                 ) + "\n"
                             )
                         )
@@ -470,23 +466,23 @@ class ScpCnFeedPlugin(Star):
         self,
         source_key: str,
         items: list[FeedItem],
-        suffix: str,
-        is_update: bool = False,
     ) -> str:
         source = SOURCES[source_key]
-        if is_update:
-            lines = [f"SCP-CN {source.title}更新：检测到 {len(items)} 条新增，{suffix}"]
-        elif items:
-            lines = [f"SCP-CN {source.title}：{items[0].title}", suffix]
-        else:
-            lines = [f"SCP-CN {source.title}：{suffix}"]
-        if source_key in {"featured_scp", "featured_tale"}:
-            if is_update:
-                for item in items:
-                    lines.append(f"{item.title}\n原文：{item.url}")
-            elif items:
-                lines.append(f"原文：{items[0].url}")
-        return "\n".join(lines)
+        if not items:
+            return f"SCP-CN {source.title}：暂无可截图内容。"
+
+        blocks = []
+        for item in items[:MAX_ITEMS_PER_SOURCE]:
+            if source_key in {"featured_scp", "featured_tale"}:
+                lines = [f"SCP-CN {source.title}：", item.title]
+            else:
+                lines = [f"SCP-CN {source.title}：{item.title}"]
+            if item.summary:
+                lines.append(self._compact_summary(item))
+            if source_key in {"featured_scp", "featured_tale"}:
+                lines.append(f"原文：{item.url}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
 
     def _resolve_sources(self, source_name: str) -> set[str]:
         source_key = ALIASES.get(source_name.strip().lower())
