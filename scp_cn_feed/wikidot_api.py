@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import email.utils
+import html
+import re
 import time
 from datetime import timezone
 from html.parser import HTMLParser
@@ -334,18 +336,57 @@ def _fullname_from_link(link: str) -> str | None:
     return path or None
 
 
+def _escape_html_text(value: str) -> str:
+    return html.escape(value, quote=False)
+
+
+def _normalize_inline_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _normalize_inline_html(value: str) -> str:
+    compact = re.sub(r"\s+", " ", value)
+    compact = re.sub(r"\s+(</span>)", r"\1", compact)
+    compact = re.sub(r"(<span[^>]*>)\s+", r"\1", compact)
+    return compact.strip()
+
+
 class _HtmlNode:
     def __init__(self, tag: str, attrs: dict[str, str] | None = None):
         self.tag = tag
         self.attrs = attrs or {}
         self.children: list[_HtmlNode] = []
         self.text_parts: list[str] = []
+        self.parts: list[str | _HtmlNode] = []
 
     def text(self) -> str:
-        parts = [*self.text_parts]
-        for child in self.children:
-            parts.append(child.text())
-        return " ".join(" ".join(parts).split())
+        return _normalize_inline_text(self._raw_text())
+
+    def summary_html(self) -> str:
+        return _normalize_inline_html(self._raw_html())
+
+    def _raw_text(self) -> str:
+        parts: list[str] = []
+        for part in self.parts:
+            if isinstance(part, str):
+                parts.append(part)
+            else:
+                parts.append(part._raw_text())
+        return "".join(parts)
+
+    def _raw_html(self) -> str:
+        parts: list[str] = []
+        for part in self.parts:
+            if isinstance(part, str):
+                parts.append(_escape_html_text(part))
+                continue
+
+            inner = part._raw_html()
+            if part.tag == "a" and _normalize_inline_text(part._raw_text()):
+                parts.append(f'<span class="summary-link">{inner}</span>')
+            else:
+                parts.append(inner)
+        return "".join(parts)
 
     def has_class(self, class_name: str) -> bool:
         return class_name in self.attrs.get("class", "").split()
@@ -385,6 +426,7 @@ class _TreeParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
         node = _HtmlNode(tag, {key: value or "" for key, value in attrs})
         self.stack[-1].children.append(node)
+        self.stack[-1].parts.append(node)
         if tag not in {"br", "hr", "img", "input", "meta", "link"}:
             self.stack.append(node)
 
@@ -397,6 +439,7 @@ class _TreeParser(HTMLParser):
     def handle_data(self, data: str):
         if data.strip():
             self.stack[-1].text_parts.append(data)
+            self.stack[-1].parts.append(data)
 
 
 def _parse_html_tree(body: bytes) -> _HtmlNode:
@@ -424,6 +467,7 @@ def _extract_feature_panel(root: _HtmlNode, source: FeedSource, heading_text: st
         subtitle = panel.first("div", "feature-subtitle")
         author = _extract_author_text(subtitle) if subtitle else None
         summary = "\n".join(node.text() for node in panel.find_all("em") if node.text())
+        summary_html = "<br>".join(node.summary_html() for node in panel.find_all("em") if node.text())
 
         return FeedItem(
             source_key=source.key,
@@ -433,6 +477,7 @@ def _extract_feature_panel(root: _HtmlNode, source: FeedSource, heading_text: st
             created_by=author,
             tags=(heading_text,),
             summary=summary or None,
+            summary_html=summary_html or None,
         )
     return None
 
@@ -450,7 +495,8 @@ def _extract_homepage_contest(root: _HtmlNode, source: FeedSource) -> FeedItem |
 
     summary_panel = _find_contest_summary_panel(root, contest_banner, url)
     summary = _paragraph_summary(summary_panel)
-    title = _title_from_contest_url(fullname)
+    summary_html = _paragraph_summary_html(summary_panel)
+    title = _link_text_for_url(summary_panel, url) or _title_from_contest_url(fullname)
 
     return FeedItem(
         source_key=source.key,
@@ -459,6 +505,7 @@ def _extract_homepage_contest(root: _HtmlNode, source: FeedSource) -> FeedItem |
         url=url,
         tags=("首页竞赛",),
         summary=summary or None,
+        summary_html=summary_html or None,
     )
 
 
@@ -524,6 +571,20 @@ def _node_contains_link(node: _HtmlNode, target_url: str) -> bool:
     return False
 
 
+def _link_text_for_url(node: _HtmlNode | None, target_url: str) -> str | None:
+    if not node:
+        return None
+    target_fullname = _fullname_from_link(target_url)
+    for link in node.find_all("a"):
+        link_url = _normalize_scp_link(link.attrs.get("href", ""))
+        if _fullname_from_link(link_url or "") != target_fullname:
+            continue
+        text = link.text()
+        if text:
+            return text
+    return None
+
+
 def _paragraph_summary(node: _HtmlNode | None) -> str:
     if not node:
         return ""
@@ -531,6 +592,19 @@ def _paragraph_summary(node: _HtmlNode | None) -> str:
     if paragraphs:
         return "\n".join(paragraphs)
     return node.text()
+
+
+def _paragraph_summary_html(node: _HtmlNode | None) -> str:
+    if not node:
+        return ""
+    paragraphs = [
+        child.summary_html()
+        for child in node.children
+        if child.tag == "p" and child.text()
+    ]
+    if paragraphs:
+        return "<br>".join(paragraphs)
+    return node.summary_html()
 
 
 def _extract_author_text(node: _HtmlNode) -> str | None:

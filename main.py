@@ -8,9 +8,11 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 
 from .scp_cn_feed.models import ALIASES, SOURCES, FeedItem
+from .scp_cn_feed.renderer import FeedRenderError, FeedRenderer, RenderOptions
 from .scp_cn_feed.service import FeedService
 from .scp_cn_feed.storage import FeedStore
 from .scp_cn_feed.wikidot_api import WikidotApiClient, WikidotApiError
@@ -32,6 +34,7 @@ class ScpCnFeedPlugin(Star):
         self.config = config or {}
         self.store = FeedStore(self._state_path())
         self.service = FeedService(self.store, WikidotApiClient())
+        self.renderer = FeedRenderer(self._render_dir(), self._render_options())
         self._task: asyncio.Task[None] | None = None
 
     def _state_path(self) -> Path:
@@ -51,6 +54,9 @@ class ScpCnFeedPlugin(Star):
                     with suppress(OSError):
                         temp_path.unlink()
         return state_path
+
+    def _render_dir(self) -> Path:
+        return StarTools.get_data_dir(PLUGIN_NAME) / "renders"
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):
@@ -212,10 +218,32 @@ class ScpCnFeedPlugin(Star):
                 messages.append(f"{SOURCES[source_key].title}：暂无新增。")
                 self.service.mark_latest(origin, source_key, items)
                 continue
-            messages.append(self._format_push(SOURCES[source_key].title, new_items))
+            if self._push_screenshot_enabled():
+                if messages:
+                    yield event.plain_result("\n\n".join(messages))
+                    messages = []
+                try:
+                    self.renderer.prune_old_files()
+                    image_path = await self.renderer.render_update_screenshot(
+                        SOURCES[source_key],
+                        new_items,
+                    )
+                    yield event.plain_result(
+                        f"SCP-CN {SOURCES[source_key].title}更新：检测到 {len(new_items)} 条新增，网页截图如下。"
+                    )
+                    yield event.image_result(str(image_path))
+                except FeedRenderError as exc:
+                    logger.warning(f"SCP-CN update screenshot failed for {source_key}: {exc}")
+                    messages.append(self._format_push(SOURCES[source_key].title, new_items))
+                except Exception as exc:
+                    logger.warning(f"SCP-CN update screenshot crashed for {source_key}: {exc}")
+                    messages.append(self._format_push(SOURCES[source_key].title, new_items))
+            else:
+                messages.append(self._format_push(SOURCES[source_key].title, new_items))
             self.service.mark_latest(origin, source_key, items)
 
-        yield event.plain_result("\n\n".join(messages))
+        if messages:
+            yield event.plain_result("\n\n".join(messages))
 
     @scpfeed.command("日报")
     async def daily_report(self, event: AstrMessageEvent):
@@ -241,6 +269,22 @@ class ScpCnFeedPlugin(Star):
             sections[source_key] = items
             if error:
                 errors[source_key] = error
+
+        if self._daily_report_image_enabled():
+            try:
+                self.renderer.prune_old_files()
+                image_path = await self.renderer.render_daily_report(
+                    sections,
+                    errors,
+                    SOURCE_ORDER,
+                    SOURCES,
+                )
+                yield event.image_result(str(image_path))
+                return
+            except FeedRenderError as exc:
+                logger.warning(f"SCP-CN daily report render failed: {exc}")
+            except Exception as exc:
+                logger.warning(f"SCP-CN daily report render crashed: {exc}")
 
         yield event.plain_result(self._format_daily_report(sections, errors))
 
@@ -278,9 +322,12 @@ class ScpCnFeedPlugin(Star):
 
         source_keys = set().union(*subscriptions.values())
         fetched = await self.service.fetch_many(source_keys, limit=MAX_ITEMS_PER_SOURCE)
+        rendered_images: dict[tuple[str, tuple[str, ...]], Path] = {}
 
         for origin, subscribed_sources in subscriptions.items():
-            parts: list[str] = []
+            text_parts: list[str] = []
+            fallback_text_parts: list[str] = []
+            image_components: list[Plain | Image] = []
             latest_updates: list[tuple[str, list[FeedItem]]] = []
             for source_key in sorted(subscribed_sources):
                 items = fetched.get(source_key, [])
@@ -288,17 +335,83 @@ class ScpCnFeedPlugin(Star):
                 if not new_items:
                     self.service.mark_latest(origin, source_key, items)
                     continue
-                parts.append(self._format_push(SOURCES[source_key].title, new_items))
+                push_text = self._format_push(SOURCES[source_key].title, new_items)
+                fallback_text_parts.append(push_text)
+                if self._push_screenshot_enabled():
+                    try:
+                        image_path = await self._render_cached_update_image(
+                            rendered_images,
+                            source_key,
+                            new_items,
+                        )
+                        image_components.append(
+                            Plain(f"SCP-CN {SOURCES[source_key].title}更新：检测到 {len(new_items)} 条新增。\n")
+                        )
+                        image_components.append(Image.fromFileSystem(str(image_path)))
+                    except FeedRenderError as exc:
+                        logger.warning(f"SCP-CN update screenshot failed for {source_key}: {exc}")
+                        text_parts.append(push_text)
+                    except Exception as exc:
+                        logger.warning(f"SCP-CN update screenshot crashed for {source_key}: {exc}")
+                        text_parts.append(push_text)
+                else:
+                    text_parts.append(push_text)
                 latest_updates.append((source_key, items))
-            if parts:
+            if image_components or text_parts:
                 try:
-                    await self.context.send_message(origin, MessageChain().message("\n\n".join(parts)))
+                    await self.context.send_message(
+                        origin,
+                        self._build_push_message_chain(image_components, text_parts),
+                    )
                 except Exception as exc:
                     logger.warning(f"SCP-CN feed push failed for {origin}: {exc}")
+                    if image_components:
+                        try:
+                            fallback_text = "\n\n".join(fallback_text_parts)
+                            await self.context.send_message(origin, MessageChain().message(fallback_text))
+                        except Exception as fallback_exc:
+                            logger.warning(f"SCP-CN feed text fallback failed for {origin}: {fallback_exc}")
+                            continue
+                    else:
+                        continue
                 else:
-                    for source_key, items in latest_updates:
-                        self.service.mark_latest(origin, source_key, items)
+                    pass
+                for source_key, items in latest_updates:
+                    self.service.mark_latest(origin, source_key, items)
                 await asyncio.sleep(PUSH_SEND_INTERVAL_SECONDS)
+
+    async def _render_cached_update_image(
+        self,
+        cache: dict[tuple[str, tuple[str, ...]], Path],
+        source_key: str,
+        new_items: list[FeedItem],
+    ) -> Path:
+        cache_key = (source_key, tuple(item.item_id for item in new_items))
+        cached = cache.get(cache_key)
+        if cached and cached.exists():
+            return cached
+
+        self.renderer.prune_old_files()
+        image_path = await self.renderer.render_update_screenshot(
+            SOURCES[source_key],
+            new_items,
+        )
+        cache[cache_key] = image_path
+        return image_path
+
+    def _build_push_message_chain(
+        self,
+        image_components: list[Plain | Image],
+        text_parts: list[str],
+    ) -> MessageChain:
+        components: list[Plain | Image] = []
+        components.extend(image_components)
+        if text_parts:
+            prefix = "\n\n" if components else ""
+            components.append(Plain(prefix + "\n\n".join(text_parts)))
+        if components:
+            return MessageChain(components)
+        return MessageChain()
 
     def _resolve_sources(self, source_name: str) -> set[str]:
         source_key = ALIASES.get(source_name.strip().lower())
@@ -317,6 +430,36 @@ class ScpCnFeedPlugin(Star):
 
     def _poll_interval_seconds(self) -> int:
         return self._poll_interval_days() * SECONDS_PER_DAY
+
+    def _render_options(self) -> RenderOptions:
+        return RenderOptions(
+            browser_path=str(self.config.get("playwright_browser_path", "") or "").strip(),
+            timeout_seconds=self._int_config("render_timeout_seconds", 35, minimum=5),
+            retention_hours=self._int_config("render_retention_hours", 72, minimum=1),
+        )
+
+    def _daily_report_image_enabled(self) -> bool:
+        return self._bool_config("enable_daily_report_image", True)
+
+    def _push_screenshot_enabled(self) -> bool:
+        return self._bool_config("enable_push_webpage_screenshot", True)
+
+    def _int_config(self, key: str, default: int, minimum: int | None = None) -> int:
+        try:
+            value = int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        if minimum is not None:
+            value = max(minimum, value)
+        return value
+
+    def _bool_config(self, key: str, default: bool) -> bool:
+        value = self.config.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off", "关闭", "否"}
+        return bool(value)
 
     def _blocked_text(self, event: AstrMessageEvent) -> str | None:
         origin = event.unified_msg_origin

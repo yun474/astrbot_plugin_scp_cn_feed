@@ -16,5 +16,35 @@
     "type": "list",
     "default": [],
     "hint": "填写禁止使用和接收推送的 event.unified_msg_origin。黑名单优先级高于白名单。"
+  },
+  "enable_daily_report_image": {
+    "description": "日报使用图片卡片",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后 /scpfeed 日报 会把抓取结果渲染成 HTML 卡片截图发送；渲染失败时自动回退文本日报。"
+  },
+  "enable_push_webpage_screenshot": {
+    "description": "更新推送使用网页截图",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后自动推送和 /scpfeed 检查 在检测到新增时会截图 SCP 中文站相关网页区域；截图失败时自动回退文本推送。"
+  },
+  "playwright_browser_path": {
+    "description": "Playwright 浏览器路径",
+    "type": "string",
+    "default": "",
+    "hint": "可选。留空时插件会优先寻找系统 Edge/Chrome，再尝试 Playwright 自带浏览器。Windows 可填写 msedge.exe 或 chrome.exe 的完整路径。"
+  },
+  "render_timeout_seconds": {
+    "description": "渲染超时时间（秒）",
+    "type": "int",
+    "default": 35,
+    "hint": "Playwright 打开网页和截图的超时时间，最低按 5 秒处理。"
+  },
+  "render_retention_hours": {
+    "description": "渲染图片保留时间（小时）",
+    "type": "int",
+    "default": 72,
+    "hint": "插件会定期清理 data/plugin_data/astrbot_plugin_scp_cn_feed/renders 下超过该时间的旧图片，最低按 1 小时处理。"
   }
 }

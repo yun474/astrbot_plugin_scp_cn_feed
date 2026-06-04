@@ -36,6 +36,7 @@ class FeedItem:
     created_at: str | None = None
     tags: tuple[str, ...] = ()
     summary: str | None = None
+    summary_html: str | None = None
     image_url: str | None = None
 
     @property
