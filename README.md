@@ -209,7 +209,11 @@ data/plugin_data/astrbot_plugin_scp_cn_feed/state.json
 /scpfeed 日报
 ```
 
-会得到类似这样的消息：
+默认图片模式会得到这样的日报：
+
+![SCP-CN 中文站日报预览](docs/images/daily-report-preview.png)
+
+关闭日报图片或图片渲染失败时，会自动回退为类似这样的文字消息：
 
 ```text
 SCP-CN 日报 2026-05-04
