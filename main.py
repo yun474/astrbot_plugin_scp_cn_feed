@@ -26,16 +26,25 @@ DAILY_REPORT_ITEMS_PER_SOURCE = 5
 PUSH_SEND_INTERVAL_SECONDS = 1.0
 SOURCE_ORDER = ("featured_scp", "featured_tale", "contests")
 PLUGIN_NAME = "astrbot_plugin_scp_cn_feed"
+PUSH_MODE_DAILY_REPORT = "daily_report"
+PUSH_MODE_MODULE_SCREENSHOT = "module_screenshot"
+PUSH_MODE_TEXT = "text"
+PUSH_MODES = {
+    PUSH_MODE_DAILY_REPORT,
+    PUSH_MODE_MODULE_SCREENSHOT,
+    PUSH_MODE_TEXT,
+}
 
 
 class ScpCnFeedPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
-        self.config = config or {}
+        self.config = config if config is not None else {}
         self.store = FeedStore(self._state_path())
         self.service = FeedService(self.store, WikidotApiClient())
         self.renderer = FeedRenderer(self._render_dir(), self._render_options())
         self._task: asyncio.Task[None] | None = None
+        self._initialize_subscription_config()
 
     def _state_path(self) -> Path:
         plugin_data_path = StarTools.get_data_dir(PLUGIN_NAME)
@@ -110,6 +119,7 @@ class ScpCnFeedPlugin(Star):
         if blocked_text := self._blocked_text(event):
             yield event.plain_result(blocked_text)
             return
+        self._sync_subscriptions_from_config()
         origin = event.unified_msg_origin
         subscriptions = self.store.subscriptions_for(origin)
         interval_days = self._poll_interval_days()
@@ -136,22 +146,28 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(self._unknown_source_text(source_name))
             return
 
-        for source_key in source_keys:
-            self.store.subscribe(event.unified_msg_origin, source_key)
-
         origin = event.unified_msg_origin
+        self._sync_subscriptions_from_config()
+        for source_key in source_keys:
+            self.store.subscribe(origin, source_key)
+        config_saved = self._sync_subscription_config_from_store()
         try:
             count = await self.service.baseline_sources(origin, source_keys)
         except WikidotApiError as exc:
             logger.warning(f"SCP-CN baseline failed: {exc}")
+            config_note = "" if config_saved else "\n警告：写入插件配置失败，请检查 AstrBot 日志。"
             yield event.plain_result(
                 "订阅已保存，但建立基线失败。下一次成功检查会先记录当前最新内容，避免推送历史内容。\n"
-                f"错误：{exc}"
+                f"错误：{exc}{config_note}"
             )
             return
 
         names = "、".join(SOURCES[key].title for key in sorted(source_keys))
-        yield event.plain_result(f"已订阅：{names}\n已抓取 {count} 条当前内容，并按来源记录最新内容作为基线，后续只推新增。")
+        config_note = "\n订阅会话已同步到插件配置。" if config_saved else "\n警告：写入插件配置失败，请检查 AstrBot 日志。"
+        yield event.plain_result(
+            f"已订阅：{names}\n已抓取 {count} 条当前内容，并按来源记录最新内容作为基线，后续只推新增。"
+            + config_note
+        )
 
     @scpfeed.command("取消")
     async def unsubscribe(self, event: AstrMessageEvent, source_name: str):
@@ -164,11 +180,14 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(self._unknown_source_text(source_name))
             return
 
+        self._sync_subscriptions_from_config()
         for source_key in source_keys:
             self.store.unsubscribe(event.unified_msg_origin, source_key)
+        config_saved = self._sync_subscription_config_from_store()
 
         names = "、".join(SOURCES[key].title for key in sorted(source_keys))
-        yield event.plain_result(f"已取消订阅：{names}")
+        config_note = "\n订阅会话已同步到插件配置。" if config_saved else "\n警告：写入插件配置失败，请检查 AstrBot 日志。"
+        yield event.plain_result(f"已取消订阅：{names}{config_note}")
 
     @scpfeed.command("基线")
     async def baseline(self, event: AstrMessageEvent, source_name: str):
@@ -200,18 +219,16 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(self._unknown_source_text(source_name))
             return
 
-        try:
-            fetched = await self.service.fetch_many(
-                source_keys,
-                limit=MAX_ITEMS_PER_SOURCE,
-                use_cache=False,
-            )
-        except WikidotApiError as exc:
-            yield event.plain_result(f"检查失败：{exc}")
-            return
-
+        fetched, fetch_errors = await self._fetch_sources_safely(
+            source_keys,
+            limit=MAX_ITEMS_PER_SOURCE,
+            use_cache=False,
+        )
         origin = event.unified_msg_origin
         messages: list[str] = []
+        updates: list[tuple[str, list[FeedItem], list[FeedItem]]] = []
+        for source_key, error in sorted(fetch_errors.items()):
+            messages.append(f"{SOURCES[source_key].title}：检查失败：{error}")
         for source_key in sorted(fetched):
             items = fetched[source_key]
             new_items = self.service.only_new(origin, source_key, items)
@@ -219,10 +236,43 @@ class ScpCnFeedPlugin(Star):
                 messages.append(f"{SOURCES[source_key].title}：暂无新增。")
                 self.service.mark_latest(origin, source_key, items)
                 continue
-            if self._push_screenshot_enabled():
-                if messages:
-                    yield event.plain_result("\n\n".join(messages))
-                    messages = []
+            updates.append((source_key, items, new_items))
+
+        if not updates:
+            if messages:
+                yield event.plain_result("\n\n".join(messages))
+            return
+
+        push_mode = self._update_push_mode()
+        if messages:
+            yield event.plain_result("\n\n".join(messages))
+
+        if push_mode == PUSH_MODE_DAILY_REPORT:
+            sections, errors = await self._fetch_daily_sections(
+                use_cache=False,
+                seed=fetched,
+                seed_errors=fetch_errors,
+            )
+            if self._daily_report_image_enabled():
+                try:
+                    self.renderer.prune_old_files()
+                    image_path = await self.renderer.render_daily_report(
+                        sections,
+                        errors,
+                        SOURCE_ORDER,
+                        SOURCES,
+                    )
+                    yield event.image_result(str(image_path))
+                except FeedRenderError as exc:
+                    logger.warning(f"SCP-CN manual daily update render failed: {exc}")
+                    yield event.plain_result(self._format_daily_report(sections, errors))
+                except Exception as exc:
+                    logger.warning(f"SCP-CN manual daily update render crashed: {exc}")
+                    yield event.plain_result(self._format_daily_report(sections, errors))
+            else:
+                yield event.plain_result(self._format_daily_report(sections, errors))
+        elif push_mode == PUSH_MODE_MODULE_SCREENSHOT:
+            for source_key, _items, new_items in updates:
                 try:
                     self.renderer.prune_old_files()
                     image_path = await self.renderer.render_update_screenshot(
@@ -233,16 +283,20 @@ class ScpCnFeedPlugin(Star):
                     yield event.image_result(str(image_path))
                 except FeedRenderError as exc:
                     logger.warning(f"SCP-CN update screenshot failed for {source_key}: {exc}")
-                    messages.append(self._format_push(SOURCES[source_key].title, new_items))
+                    yield event.plain_result(self._format_push(SOURCES[source_key].title, new_items))
                 except Exception as exc:
                     logger.warning(f"SCP-CN update screenshot crashed for {source_key}: {exc}")
-                    messages.append(self._format_push(SOURCES[source_key].title, new_items))
-            else:
-                messages.append(self._format_push(SOURCES[source_key].title, new_items))
-            self.service.mark_latest(origin, source_key, items)
+                    yield event.plain_result(self._format_push(SOURCES[source_key].title, new_items))
+        else:
+            yield event.plain_result(
+                "\n\n".join(
+                    self._format_push(SOURCES[source_key].title, new_items)
+                    for source_key, _items, new_items in updates
+                )
+            )
 
-        if messages:
-            yield event.plain_result("\n\n".join(messages))
+        for source_key, items, _new_items in updates:
+            self.service.mark_latest(origin, source_key, items)
 
     @scpfeed.command("截图")
     async def screenshot(self, event: AstrMessageEvent, source_name: str):
@@ -295,24 +349,7 @@ class ScpCnFeedPlugin(Star):
         if blocked_text := self._blocked_text(event):
             yield event.plain_result(blocked_text)
             return
-        sections: dict[str, list[FeedItem]] = {}
-        errors: dict[str, str] = {}
-
-        async def fetch_section(source_key: str) -> tuple[str, list[FeedItem], str | None]:
-            try:
-                items = await self.service.fetch_source(
-                    SOURCES[source_key],
-                    limit=DAILY_REPORT_ITEMS_PER_SOURCE,
-                )
-                return source_key, items, None
-            except WikidotApiError as exc:
-                return source_key, [], str(exc)
-
-        results = await asyncio.gather(*(fetch_section(source_key) for source_key in SOURCE_ORDER))
-        for source_key, items, error in results:
-            sections[source_key] = items
-            if error:
-                errors[source_key] = error
+        sections, errors = await self._fetch_daily_sections()
 
         if self._daily_report_image_enabled():
             try:
@@ -331,6 +368,101 @@ class ScpCnFeedPlugin(Star):
                 logger.warning(f"SCP-CN daily report render crashed: {exc}")
 
         yield event.plain_result(self._format_daily_report(sections, errors))
+
+    async def _fetch_daily_sections(
+        self,
+        *,
+        use_cache: bool = True,
+        seed: dict[str, list[FeedItem]] | None = None,
+        seed_errors: dict[str, str] | None = None,
+    ) -> tuple[dict[str, list[FeedItem]], dict[str, str]]:
+        sections = {
+            source_key: list(items)
+            for source_key, items in (seed or {}).items()
+            if source_key in SOURCE_ORDER
+        }
+        errors = {
+            source_key: message
+            for source_key, message in (seed_errors or {}).items()
+            if source_key in SOURCE_ORDER
+        }
+
+        async def fetch_section(source_key: str) -> tuple[str, list[FeedItem], str | None]:
+            try:
+                items = await self.service.fetch_source(
+                    SOURCES[source_key],
+                    limit=DAILY_REPORT_ITEMS_PER_SOURCE,
+                    use_cache=use_cache,
+                )
+                return source_key, items, None
+            except WikidotApiError as exc:
+                return source_key, [], str(exc)
+            except Exception as exc:
+                logger.warning(f"SCP-CN daily fetch crashed for {source_key}: {exc}")
+                return source_key, [], str(exc)
+
+        missing = [source_key for source_key in SOURCE_ORDER if source_key not in sections]
+        results = await asyncio.gather(*(fetch_section(source_key) for source_key in missing))
+        for source_key, items, error in results:
+            sections[source_key] = items
+            if error:
+                errors[source_key] = error
+            else:
+                errors.pop(source_key, None)
+        return sections, errors
+
+    async def _fetch_sources_safely(
+        self,
+        source_keys: set[str],
+        *,
+        limit: int,
+        use_cache: bool = True,
+    ) -> tuple[dict[str, list[FeedItem]], dict[str, str]]:
+        async def fetch_one(source_key: str) -> tuple[str, list[FeedItem], str | None]:
+            try:
+                items = await self.service.fetch_source(
+                    SOURCES[source_key],
+                    limit=limit,
+                    use_cache=use_cache,
+                )
+                return source_key, items, None
+            except WikidotApiError as exc:
+                return source_key, [], str(exc)
+            except Exception as exc:
+                logger.warning(f"SCP-CN poll fetch crashed for {source_key}: {exc}")
+                return source_key, [], str(exc)
+
+        fetched: dict[str, list[FeedItem]] = {}
+        errors: dict[str, str] = {}
+        results = await asyncio.gather(*(fetch_one(key) for key in sorted(source_keys)))
+        for source_key, items, error in results:
+            if error:
+                errors[source_key] = error
+            else:
+                fetched[source_key] = items
+        return fetched, errors
+
+    async def _daily_report_push_chain(
+        self,
+        sections: dict[str, list[FeedItem]],
+        errors: dict[str, str],
+    ) -> tuple[MessageChain, str, bool]:
+        fallback_text = self._format_daily_report(sections, errors)
+        if self._daily_report_image_enabled():
+            try:
+                self.renderer.prune_old_files()
+                image_path = await self.renderer.render_daily_report(
+                    sections,
+                    errors,
+                    SOURCE_ORDER,
+                    SOURCES,
+                )
+                return MessageChain([Image.fromFileSystem(str(image_path))]), fallback_text, True
+            except FeedRenderError as exc:
+                logger.warning(f"SCP-CN automatic daily report render failed: {exc}")
+            except Exception as exc:
+                logger.warning(f"SCP-CN automatic daily report render crashed: {exc}")
+        return MessageChain().message(fallback_text), fallback_text, False
 
     async def terminate(self):
         if self._task:
@@ -353,6 +485,7 @@ class ScpCnFeedPlugin(Star):
             await asyncio.sleep(self._poll_interval_seconds())
 
     async def _poll_once(self):
+        self._sync_subscriptions_from_config()
         subscriptions = self.store.all_subscriptions()
         if not subscriptions:
             return
@@ -364,24 +497,63 @@ class ScpCnFeedPlugin(Star):
         if not subscriptions:
             return
 
+        push_mode = self._update_push_mode()
         source_keys = set().union(*subscriptions.values())
-        fetched = await self.service.fetch_many(source_keys, limit=MAX_ITEMS_PER_SOURCE)
+        if push_mode == PUSH_MODE_DAILY_REPORT:
+            source_keys.update(SOURCE_ORDER)
+        fetched, fetch_errors = await self._fetch_sources_safely(
+            source_keys,
+            limit=MAX_ITEMS_PER_SOURCE,
+        )
+        for source_key, error in fetch_errors.items():
+            logger.warning(f"SCP-CN poll fetch failed for {source_key}: {error}")
         rendered_images: dict[tuple[str, tuple[str, ...]], Path] = {}
+        daily_push: tuple[MessageChain, str, bool] | None = None
 
         for origin, subscribed_sources in subscriptions.items():
-            text_parts: list[str] = []
-            fallback_text_parts: list[str] = []
-            image_components: list[Plain | Image] = []
             latest_updates: list[tuple[str, list[FeedItem]]] = []
             for source_key in sorted(subscribed_sources):
-                items = fetched.get(source_key, [])
+                if source_key not in fetched:
+                    continue
+                items = fetched[source_key]
                 new_items = self.service.only_new(origin, source_key, items)
                 if not new_items:
                     self.service.mark_latest(origin, source_key, items)
                     continue
-                push_text = self._format_push(SOURCES[source_key].title, new_items)
-                fallback_text_parts.append(push_text)
-                if self._push_screenshot_enabled():
+                latest_updates.append((source_key, items))
+
+            if not latest_updates:
+                continue
+
+            fallback_text_parts = [
+                self._format_push(
+                    SOURCES[source_key].title,
+                    self.service.only_new(origin, source_key, items),
+                )
+                for source_key, items in latest_updates
+            ]
+            fallback_text = "\n\n".join(fallback_text_parts)
+            has_image = False
+
+            if push_mode == PUSH_MODE_DAILY_REPORT:
+                if daily_push is None:
+                    sections = {
+                        source_key: fetched.get(source_key, [])
+                        for source_key in SOURCE_ORDER
+                    }
+                    daily_errors = {
+                        source_key: message
+                        for source_key, message in fetch_errors.items()
+                        if source_key in SOURCE_ORDER
+                    }
+                    daily_push = await self._daily_report_push_chain(sections, daily_errors)
+                message_chain, send_fallback_text, has_image = daily_push
+            elif push_mode == PUSH_MODE_MODULE_SCREENSHOT:
+                text_parts: list[str] = []
+                image_components: list[Plain | Image] = []
+                for source_key, items in latest_updates:
+                    new_items = self.service.only_new(origin, source_key, items)
+                    push_text = self._format_push(SOURCES[source_key].title, new_items)
                     try:
                         image_path = await self._render_cached_update_image(
                             rendered_images,
@@ -403,31 +575,31 @@ class ScpCnFeedPlugin(Star):
                     except Exception as exc:
                         logger.warning(f"SCP-CN update screenshot crashed for {source_key}: {exc}")
                         text_parts.append(push_text)
-                else:
-                    text_parts.append(push_text)
-                latest_updates.append((source_key, items))
-            if image_components or text_parts:
+                message_chain = self._build_push_message_chain(image_components, text_parts)
+                send_fallback_text = fallback_text
+                has_image = bool(image_components)
+            else:
+                message_chain = MessageChain().message(fallback_text)
+                send_fallback_text = fallback_text
+
+            try:
+                await self.context.send_message(origin, message_chain)
+            except Exception as exc:
+                logger.warning(f"SCP-CN feed push failed for {origin}: {exc}")
+                if not has_image:
+                    continue
                 try:
                     await self.context.send_message(
                         origin,
-                        self._build_push_message_chain(image_components, text_parts),
+                        MessageChain().message(send_fallback_text),
                     )
-                except Exception as exc:
-                    logger.warning(f"SCP-CN feed push failed for {origin}: {exc}")
-                    if image_components:
-                        try:
-                            fallback_text = "\n\n".join(fallback_text_parts)
-                            await self.context.send_message(origin, MessageChain().message(fallback_text))
-                        except Exception as fallback_exc:
-                            logger.warning(f"SCP-CN feed text fallback failed for {origin}: {fallback_exc}")
-                            continue
-                    else:
-                        continue
-                else:
-                    pass
-                for source_key, items in latest_updates:
-                    self.service.mark_latest(origin, source_key, items)
-                await asyncio.sleep(PUSH_SEND_INTERVAL_SECONDS)
+                except Exception as fallback_exc:
+                    logger.warning(f"SCP-CN feed text fallback failed for {origin}: {fallback_exc}")
+                    continue
+
+            for source_key, items in latest_updates:
+                self.service.mark_latest(origin, source_key, items)
+            await asyncio.sleep(PUSH_SEND_INTERVAL_SECONDS)
 
     async def _render_cached_update_image(
         self,
@@ -511,11 +683,84 @@ class ScpCnFeedPlugin(Star):
             retention_hours=self._int_config("render_retention_hours", 72, minimum=1),
         )
 
+    def _initialize_subscription_config(self) -> None:
+        configured = self._subscriptions_from_config()
+        stored = self.store.all_subscriptions()
+
+        if not self.store.subscription_config_sync_complete():
+            # 首次升级时保留 state.json 中的旧订阅；配置中同会话的显式项优先。
+            merged = {origin: set(sources) for origin, sources in stored.items()}
+            merged.update(configured)
+            self.store.replace_subscriptions(merged)
+            if merged != configured:
+                self._write_subscription_config(merged)
+            return
+
+        if configured != stored:
+            self.store.replace_subscriptions(configured)
+
+    def _sync_subscriptions_from_config(self) -> None:
+        configured = self._subscriptions_from_config()
+        if configured != self.store.all_subscriptions():
+            self.store.replace_subscriptions(configured)
+
+    def _sync_subscription_config_from_store(self) -> bool:
+        return self._write_subscription_config(self.store.all_subscriptions())
+
+    def _subscriptions_from_config(self) -> dict[str, set[str]]:
+        raw_entries = self.config.get("subscription_sessions", [])
+        if not isinstance(raw_entries, (list, tuple)):
+            return {}
+
+        subscriptions: dict[str, set[str]] = {}
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            origin = str(entry.get("origin", "") or "").strip()
+            if not origin:
+                continue
+            sources = {
+                source_key
+                for source_key in SOURCE_ORDER
+                if self._as_bool(entry.get(source_key, False))
+            }
+            if sources:
+                subscriptions[origin] = sources
+        return subscriptions
+
+    def _write_subscription_config(self, subscriptions: dict[str, set[str]]) -> bool:
+        entries = [
+            {
+                "__template_key": "subscription",
+                "origin": origin,
+                **{source_key: source_key in sources for source_key in SOURCE_ORDER},
+            }
+            for origin, sources in sorted(subscriptions.items())
+            if origin and sources
+        ]
+        if self.config.get("subscription_sessions") == entries:
+            return True
+
+        self.config["subscription_sessions"] = entries
+        save_config = getattr(self.config, "save_config", None)
+        if not callable(save_config):
+            logger.warning("SCP-CN subscription config cannot be persisted: save_config unavailable")
+            return False
+        try:
+            save_config()
+        except Exception as exc:
+            logger.warning(f"SCP-CN subscription config save failed: {exc}")
+            return False
+        return True
+
+    def _update_push_mode(self) -> str:
+        value = str(self.config.get("update_push_mode", PUSH_MODE_MODULE_SCREENSHOT) or "").strip()
+        if value in PUSH_MODES:
+            return value
+        return PUSH_MODE_MODULE_SCREENSHOT
+
     def _daily_report_image_enabled(self) -> bool:
         return self._bool_config("enable_daily_report_image", True)
-
-    def _push_screenshot_enabled(self) -> bool:
-        return self._bool_config("enable_push_webpage_screenshot", True)
 
     def _int_config(self, key: str, default: int, minimum: int | None = None) -> int:
         try:
@@ -527,7 +772,10 @@ class ScpCnFeedPlugin(Star):
         return value
 
     def _bool_config(self, key: str, default: bool) -> bool:
-        value = self.config.get(key, default)
+        return self._as_bool(self.config.get(key, default))
+
+    @staticmethod
+    def _as_bool(value: object) -> bool:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):

@@ -47,6 +47,27 @@ class FeedStore:
                 for origin, sources in self._state.get("subscriptions", {}).items()
             }
 
+    def replace_subscriptions(
+        self,
+        subscriptions: dict[str, set[str]],
+        *,
+        config_sync_complete: bool = True,
+    ) -> None:
+        with self._lock:
+            self._state["subscriptions"] = {
+                origin: sorted(sources)
+                for origin, sources in sorted(subscriptions.items())
+                if origin and sources
+            }
+            if config_sync_complete:
+                self._state["subscription_config_sync_version"] = 1
+            self._cleanup_state()
+            self.save()
+
+    def subscription_config_sync_complete(self) -> bool:
+        with self._lock:
+            return self._state.get("subscription_config_sync_version") == 1
+
     def latest_item_id(self, origin: str, source_key: str) -> str | None:
         with self._lock:
             value = self._state.get("latest_by_origin", {}).get(origin, {}).get(source_key)

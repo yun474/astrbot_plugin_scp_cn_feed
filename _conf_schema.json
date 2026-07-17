@@ -5,6 +5,41 @@
     "default": 1,
     "hint": "插件会按天轮询 SCP 中文站。代码会强制最小值为 1 天，低于 1 会按 1 天处理。"
   },
+  "subscription_sessions": {
+    "description": "订阅会话",
+    "type": "template_list",
+    "hint": "每项对应一个 event.unified_msg_origin。可在这里新增、删改订阅；聊天指令产生的订阅也会自动写回这里。修改配置并重载插件后生效。",
+    "templates": {
+      "subscription": {
+        "name": "订阅会话",
+        "display_item": "origin",
+        "items": {
+          "origin": {
+            "description": "会话标识",
+            "type": "string",
+            "default": "",
+            "hint": "填写完整的 event.unified_msg_origin，可通过 /scpfeed 状态 查看。"
+          },
+          "featured_scp": {
+            "description": "订阅精品 SCP",
+            "type": "bool",
+            "default": true
+          },
+          "featured_tale": {
+            "description": "订阅精品原创故事",
+            "type": "bool",
+            "default": true
+          },
+          "contests": {
+            "description": "订阅竞赛与活动",
+            "type": "bool",
+            "default": true
+          }
+        }
+      }
+    },
+    "default": []
+  },
   "whitelist_origins": {
     "description": "会话白名单",
     "type": "list",
@@ -23,11 +58,13 @@
     "default": true,
     "hint": "开启后 /scpfeed 日报 会把抓取结果渲染成 HTML 卡片截图发送；渲染失败时自动回退文本日报。"
   },
-  "enable_push_webpage_screenshot": {
-    "description": "更新推送使用网页截图",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后自动推送和 /scpfeed 检查 在检测到新增时会截图 SCP 中文站相关网页区域；截图失败时自动回退文本推送。"
+  "update_push_mode": {
+    "description": "更新推送形式",
+    "type": "string",
+    "options": ["daily_report", "module_screenshot", "text"],
+    "labels": ["整份日报", "新增模块截图", "文字"],
+    "default": "module_screenshot",
+    "hint": "三选一。自动推送和 /scpfeed 检查检测到新增时，发送整份日报、新增来源网页模块截图或纯文字；图片失败时自动回退文字。"
   },
   "playwright_browser_path": {
     "description": "Playwright 浏览器路径",

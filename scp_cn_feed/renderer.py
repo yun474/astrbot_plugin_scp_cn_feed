@@ -18,6 +18,9 @@ DEFAULT_DAILY_HEIGHT = 1280
 DEFAULT_UPDATE_HEIGHT = 900
 DEFAULT_TIMEOUT_SECONDS = 35
 DEFAULT_RETENTION_HOURS = 72
+SCP_FOUNDATION_LOGO_URL = (
+    "https://scp-wiki-cn.wikidot.com/local--files/component:theme/logo.png"
+)
 
 
 class FeedRenderError(RuntimeError):
@@ -59,6 +62,7 @@ class FeedRenderer:
                     device_scale_factor=1,
                 )
                 await page.set_content(html_text, wait_until="load", timeout=self.options.timeout_ms)
+                await self._wait_for_images(page)
                 await page.locator(".report").screenshot(
                     path=str(output_path),
                     timeout=self.options.timeout_ms,
@@ -396,9 +400,12 @@ class FeedRenderer:
 <body>
   <main class="report">
     <header class="header">
-      <div>
-        <div class="kicker">SCP-CN Feed</div>
-        <h1>中文站日报</h1>
+      <div class="brand">
+        <img class="foundation-logo" src="{html.escape(SCP_FOUNDATION_LOGO_URL)}" alt="SCP 基金会 Logo">
+        <div>
+          <div class="kicker">SCP-CN Feed</div>
+          <h1>中文站日报</h1>
+        </div>
       </div>
       <div class="date">{today}</div>
     </header>
@@ -504,8 +511,19 @@ body {
   padding-bottom: 22px;
   border-bottom: 3px solid #20262c;
 }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.foundation-logo {
+  display: block;
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+}
 .kicker {
-  color: #52645f;
+  color: #2367a5;
   font-family: Georgia, "Times New Roman", serif;
   font-size: 18px;
 }
@@ -577,8 +595,11 @@ h2 {
   flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 12px;
-  color: #596864;
+  color: #2367a5;
   font-size: 15px;
+}
+.meta .label {
+  color: inherit;
 }
 p {
   margin: 0;
