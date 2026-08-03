@@ -18,7 +18,7 @@
             "description": "会话标识",
             "type": "string",
             "default": "",
-            "hint": "填写完整的 event.unified_msg_origin，可通过 /scpfeed 状态 查看。"
+            "hint": "填写完整的 event.unified_msg_origin，可通过 /scp 状态 查看。"
           },
           "featured_scp": {
             "description": "订阅精品 SCP",
@@ -56,7 +56,7 @@
     "description": "日报使用图片卡片",
     "type": "bool",
     "default": true,
-    "hint": "开启后 /scpfeed 日报 会把抓取结果渲染成 HTML 卡片截图发送；渲染失败时自动回退文本日报。"
+    "hint": "开启后 /scp 日报 会把抓取结果渲染成 HTML 卡片截图发送；渲染失败时自动回退文本日报。"
   },
   "update_push_mode": {
     "description": "更新推送形式",
@@ -64,7 +64,7 @@
     "options": ["daily_report", "module_screenshot", "text"],
     "labels": ["整份日报", "新增模块截图", "文字"],
     "default": "module_screenshot",
-    "hint": "三选一。自动推送和 /scpfeed 检查检测到新增时，发送整份日报、新增来源网页模块截图或纯文字；图片失败时自动回退文字。"
+    "hint": "三选一。自动推送和 /scp 检查检测到新增时，发送整份日报、新增来源网页模块截图或纯文字；图片失败时自动回退文字。"
   },
   "playwright_browser_path": {
     "description": "Playwright 浏览器路径",

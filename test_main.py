@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import sys
 import tempfile
@@ -21,7 +22,16 @@ class _Filter:
     @staticmethod
     def command_group(_name):
         def decorator(function):
-            function.command = lambda _command: lambda handler: handler
+            function.command_group_name = _name
+
+            def command(_command):
+                def command_decorator(handler):
+                    handler.command_name = _command
+                    return handler
+
+                return command_decorator
+
+            function.command = command
             return function
 
         return decorator
@@ -122,6 +132,91 @@ def _plugin(config=None):
 
 
 class SubscriptionConfigTests(unittest.TestCase):
+    def test_command_group_is_scp_and_subscribe_has_no_source_argument(self):
+        self.assertEqual(ScpCnFeedPlugin.scp.command_group_name, "scp")
+        params = list(inspect.signature(ScpCnFeedPlugin.subscribe).parameters)
+        self.assertEqual(params, ["self", "event"])
+        self.assertEqual(ScpCnFeedPlugin.unsubscribe.command_name, "取消订阅")
+        params = list(inspect.signature(ScpCnFeedPlugin.unsubscribe).parameters)
+        self.assertEqual(params, ["self", "event"])
+
+    def test_subscribe_defaults_to_all_sources(self):
+        class Event:
+            unified_msg_origin = "group:all"
+
+            def plain_result(self, text):
+                return text
+
+        class Service:
+            def __init__(self):
+                self.baselined = None
+
+            async def baseline_sources(self, origin, source_keys):
+                self.baselined = (origin, set(source_keys))
+                return len(source_keys)
+
+        config = _Config(subscription_sessions=[])
+        plugin = _plugin(config)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin.store = FeedStore(Path(temp_dir) / "state.json")
+            plugin.service = Service()
+
+            results = []
+
+            async def collect():
+                async for result in plugin.subscribe(Event()):
+                    results.append(result)
+
+            asyncio.run(collect())
+
+            self.assertEqual(
+                plugin.store.all_subscriptions(),
+                {"group:all": {"featured_scp", "featured_tale", "contests"}},
+            )
+            self.assertEqual(
+                plugin.service.baselined,
+                ("group:all", {"featured_scp", "featured_tale", "contests"}),
+            )
+            self.assertEqual(config.save_count, 1)
+            self.assertIn("已订阅：", results[0])
+
+    def test_unsubscribe_defaults_to_all_sources(self):
+        class Event:
+            unified_msg_origin = "group:all"
+
+            def plain_result(self, text):
+                return text
+
+        config = _Config(
+            subscription_sessions=[
+                {
+                    "__template_key": "subscription",
+                    "origin": "group:all",
+                    "featured_scp": True,
+                    "featured_tale": True,
+                    "contests": True,
+                }
+            ]
+        )
+        plugin = _plugin(config)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin.store = FeedStore(Path(temp_dir) / "state.json")
+            plugin.store.replace_subscriptions(
+                {"group:all": {"featured_scp", "featured_tale", "contests"}}
+            )
+
+            results = []
+
+            async def collect():
+                async for result in plugin.unsubscribe(Event()):
+                    results.append(result)
+
+            asyncio.run(collect())
+
+            self.assertEqual(plugin.store.all_subscriptions(), {})
+            self.assertEqual(config.save_count, 1)
+            self.assertIn("已取消订阅：", results[0])
+
     def test_command_state_is_written_as_editable_template_entries(self):
         config = _Config(subscription_sessions=[])
         plugin = _plugin(config)

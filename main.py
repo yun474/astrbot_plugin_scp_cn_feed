@@ -73,14 +73,14 @@ class ScpCnFeedPlugin(Star):
             return
         self._task = asyncio.create_task(self._poll_loop())
 
-    @filter.command_group("scpfeed")
-    async def scpfeed(self, event: AstrMessageEvent):
+    @filter.command_group("scp")
+    async def scp(self, event: AstrMessageEvent):
         if blocked_text := self._blocked_text(event):
             yield event.plain_result(blocked_text)
             return
         yield event.plain_result(self._help_text())
 
-    @scpfeed.command("帮助")
+    @scp.command("帮助")
     async def help(self, event: AstrMessageEvent):
         """查看 SCP-CN Feed 插件帮助。"""
         if blocked_text := self._blocked_text(event):
@@ -91,18 +91,18 @@ class ScpCnFeedPlugin(Star):
     def _help_text(self) -> str:
         return (
             "SCP-CN Feed\n"
-            "/scpfeed 订阅 <全部|精品scp|精品原创故事|竞赛>\n"
-            "/scpfeed 取消 <全部|精品scp|精品原创故事|竞赛>\n"
-            "/scpfeed 检查 <全部|精品scp|精品原创故事|竞赛>\n"
-            "/scpfeed 截图 <精品scp|精品原创故事|竞赛>\n"
-            "/scpfeed 日报\n"
-            "/scpfeed 基线 <全部|精品scp|精品原创故事|竞赛>\n"
-            "/scpfeed 状态\n"
-            "/scpfeed 来源\n\n"
+            "/scp 订阅\n"
+            "/scp 取消订阅\n"
+            "/scp 检查 <全部|精品scp|精品原创故事|竞赛>\n"
+            "/scp 截图 <精品scp|精品原创故事|竞赛>\n"
+            "/scp 日报\n"
+            "/scp 基线 <全部|精品scp|精品原创故事|竞赛>\n"
+            "/scp 状态\n"
+            "/scp 来源\n\n"
             "说明：优先解析首页模块，失败时回退 RSS/标签页。"
         )
 
-    @scpfeed.command("来源")
+    @scp.command("来源")
     async def sources(self, event: AstrMessageEvent):
         """查看内置信息源。"""
         if blocked_text := self._blocked_text(event):
@@ -113,7 +113,7 @@ class ScpCnFeedPlugin(Star):
             lines.append(f"- {source.title}：{source.description}")
         yield event.plain_result("\n".join(lines))
 
-    @scpfeed.command("状态")
+    @scp.command("状态")
     async def status(self, event: AstrMessageEvent):
         """查看当前会话订阅状态。"""
         if blocked_text := self._blocked_text(event):
@@ -135,16 +135,13 @@ class ScpCnFeedPlugin(Star):
             + f"\n会话标识：{origin}\n轮询间隔：{interval_days} 天"
         )
 
-    @scpfeed.command("订阅")
-    async def subscribe(self, event: AstrMessageEvent, source_name: str):
-        """订阅一个或全部 SCP-CN 信息源。"""
+    @scp.command("订阅")
+    async def subscribe(self, event: AstrMessageEvent):
+        """订阅全部 SCP-CN 信息源。"""
         if blocked_text := self._blocked_text(event):
             yield event.plain_result(blocked_text)
             return
-        source_keys = self._resolve_sources(source_name)
-        if not source_keys:
-            yield event.plain_result(self._unknown_source_text(source_name))
-            return
+        source_keys = set(SOURCE_ORDER)
 
         origin = event.unified_msg_origin
         self._sync_subscriptions_from_config()
@@ -169,16 +166,13 @@ class ScpCnFeedPlugin(Star):
             + config_note
         )
 
-    @scpfeed.command("取消")
-    async def unsubscribe(self, event: AstrMessageEvent, source_name: str):
-        """取消订阅一个或全部 SCP-CN 信息源。"""
+    @scp.command("取消订阅")
+    async def unsubscribe(self, event: AstrMessageEvent):
+        """取消订阅全部 SCP-CN 信息源。"""
         if blocked_text := self._blocked_text(event):
             yield event.plain_result(blocked_text)
             return
-        source_keys = self._resolve_sources(source_name)
-        if not source_keys:
-            yield event.plain_result(self._unknown_source_text(source_name))
-            return
+        source_keys = set(SOURCE_ORDER)
 
         self._sync_subscriptions_from_config()
         for source_key in source_keys:
@@ -189,7 +183,7 @@ class ScpCnFeedPlugin(Star):
         config_note = "\n订阅会话已同步到插件配置。" if config_saved else "\n警告：写入插件配置失败，请检查 AstrBot 日志。"
         yield event.plain_result(f"已取消订阅：{names}{config_note}")
 
-    @scpfeed.command("基线")
+    @scp.command("基线")
     async def baseline(self, event: AstrMessageEvent, source_name: str):
         """手动把当前源内容标记为已读，避免推送历史内容。"""
         if blocked_text := self._blocked_text(event):
@@ -208,7 +202,7 @@ class ScpCnFeedPlugin(Star):
 
         yield event.plain_result(f"已抓取 {count} 条当前内容，并按来源记录最新内容作为基线。")
 
-    @scpfeed.command("检查")
+    @scp.command("检查")
     async def check(self, event: AstrMessageEvent, source_name: str):
         """手动检查一个或全部 SCP-CN 信息源。"""
         if blocked_text := self._blocked_text(event):
@@ -298,7 +292,7 @@ class ScpCnFeedPlugin(Star):
         for source_key, items, _new_items in updates:
             self.service.mark_latest(origin, source_key, items)
 
-    @scpfeed.command("截图")
+    @scp.command("截图")
     async def screenshot(self, event: AstrMessageEvent, source_name: str):
         """主动截取一个 SCP-CN 来源当前内容的网页区域。"""
         if blocked_text := self._blocked_text(event):
@@ -343,7 +337,7 @@ class ScpCnFeedPlugin(Star):
         yield event.plain_result(self._format_screenshot_notice(source_key, items))
         yield event.image_result(str(image_path))
 
-    @scpfeed.command("日报")
+    @scp.command("日报")
     async def daily_report(self, event: AstrMessageEvent):
         """立即抓取并生成 SCP-CN 日报。"""
         if blocked_text := self._blocked_text(event):
