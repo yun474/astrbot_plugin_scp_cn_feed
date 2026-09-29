@@ -101,3 +101,5 @@ AstrBot 的 qq_official 适配器只在内存里记住「这个会话是群」�
 - 「新增模块截图」推送形式、黑白名单、渲染超时、图片保留时间这些配置删掉了。需要限制某些会话用插件的话，用 AstrBot 自带的会话管理关掉本插件就行。
 
 更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+
+插件 logo 是 SCP 基金会中文分部徽标，图片卡片里的是 SCP 基金会徽标，都按 [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/) 使用。
