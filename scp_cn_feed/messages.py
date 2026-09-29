@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from pathlib import Path
 
 from .models import SECTIONS, SITE_BASE_URL, FeedItem
 
 
-TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
-BLOCK_RE = re.compile(r"<!--\s*区块开始\s*-->(.*?)<!--\s*区块结束\s*-->", re.S)
-COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
-FIELD_RE = re.compile(r"\{(\w+)\}")
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)\)")
 MD_SUMMARY_LIMIT = 90
 TEXT_SUMMARY_LIMIT = 140
@@ -59,44 +54,21 @@ def format_markdown(
     links: bool = True,
     today: date | None = None,
 ) -> str:
-    """按 templates 里的日报 / 推送模板填空，每次现读文件，改模板不用重载插件。"""
-    template = (TEMPLATE_DIR / ("report.md" if new is None else "push.md")).read_text(encoding="utf-8")
-    match = BLOCK_RE.search(template)
-    if not match:
-        raise ValueError("Markdown 模板里缺少 <!-- 区块开始 --> / <!-- 区块结束 --> 标记")
-
-    page = {"date": f"{(today or date.today()):%Y-%m-%d}"}
-    blocks = []
+    today = today or date.today()
+    title = "🗂️ SCP-CN 日报" if new is None else "🚨 SCP-CN 新内容通报"
+    blocks = [f"# {title}\n> {today:%Y-%m-%d} ｜ 安保 · 收容 · 保护", "***"]
     for item in items:
         section = SECTIONS[item.section]
-        blocks.append(
-            _fill(
-                match.group(1),
-                {
-                    "icon": section.icon,
-                    "section": f"{section.title}{_tag(item)}",
-                    "title": item.title,
-                    "url": item.url,
-                    "link": f"[{item.title}]({item.url})" if links else item.title,
-                    "author": item.author or "",
-                    "summary": clip_markdown(item.summary_md or item.summary or "", MD_SUMMARY_LIMIT, links=links),
-                    "new": "🆕" if new and item.section in new else "",
-                },
-            ).strip("\n")
-        )
-    text = _fill(template[: match.start()], page) + "\n\n".join(blocks) + _fill(template[match.end() :], page)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-
-def _fill(text: str, fields: dict[str, str]) -> str:
-    """去掉注释再填占位符；一行里的占位符全是空值时整行删掉。"""
-    lines = []
-    for line in COMMENT_RE.sub("", text).split("\n"):
-        known = [name for name in FIELD_RE.findall(line) if name in fields]
-        if known and not any(fields[name] for name in known):
-            continue
-        lines.append(FIELD_RE.sub(lambda m: fields.get(m.group(1), m.group(0)), line).rstrip())
-    return "\n".join(lines)
+        name = f"[{item.title}]({item.url})" if links else item.title
+        block = f"## {section.icon} {section.title}{_tag(item)}\n**{name}**"
+        if item.author:
+            block += f"\n> *作者* *{item.author}*"
+        if summary := clip_markdown(item.summary_md or item.summary or "", MD_SUMMARY_LIMIT, links=links):
+            # 空一行，摘要才不会被并进上面的引用框。
+            block += f"\n\n*{summary}*"
+        blocks.append(block)
+    blocks.append("***\n📡 数据来源：SCP 基金会中文分部首页")
+    return "\n\n".join(blocks)
 
 
 def format_markdown_text(text: str) -> str:

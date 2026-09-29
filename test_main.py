@@ -5,7 +5,6 @@ import tempfile
 import types
 import unittest
 from datetime import date
-from unittest import mock
 from pathlib import Path
 
 
@@ -57,7 +56,6 @@ _module("astrbot.api.star", Context=object, Star=object, StarTools=object)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from astrbot_plugin_scp_cn_feed.main import ScpCnFeedPlugin  # noqa: E402
-from astrbot_plugin_scp_cn_feed.scp_cn_feed import messages  # noqa: E402
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.fetcher import parse_homepage  # noqa: E402
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.messages import (  # noqa: E402
     build_keyboard,
@@ -205,32 +203,30 @@ class MessageTests(unittest.TestCase):
         labels = [button["render_data"]["label"] for row in rows for button in row["buttons"]]
         self.assertTrue(all(len(label) <= 10 for label in labels))
 
-    def test_markdown_template_filling(self):
-        template = (
-            "<!-- 说明里的 {date} 不会发出去 -->\n# 头 {date}\n"
-            "<!-- 区块开始 -->\n## {icon} {section} {new}\n**{link}**\n> {author}\n<!-- 区块结束 -->\n尾\n"
-        )
+    def test_markdown_layout(self):
         items = [
-            FeedItem("featured_scp", "a", "SCP-CN-1", "https://x.invalid/a", author="作者甲"),
-            FeedItem("featured_theme", "p", "放弃观谬", "https://x.invalid/p", tag="观谬维基"),
+            FeedItem("featured_scp", "a", "SCP-CN-1", "https://x.invalid/a", author="作者甲", summary="“引言”"),
+            FeedItem(
+                "contests",
+                "c",
+                "征文",
+                "https://x.invalid/c",
+                summary="献给征文！",
+                summary_md="献给[征文](https://x.invalid/c)！",
+            ),
         ]
-        with tempfile.TemporaryDirectory() as temp_dir:
-            (Path(temp_dir) / "push.md").write_text(template, encoding="utf-8")
-            (Path(temp_dir) / "report.md").write_text("没有区块标记", encoding="utf-8")
-            with mock.patch.object(messages, "TEMPLATE_DIR", Path(temp_dir)):
-                pushed = format_markdown(items, new={"featured_scp"}, today=date(2026, 9, 30))
-                plain = format_markdown(items[:1], new=set(), links=False, today=date(2026, 9, 30))
-                with self.assertRaises(ValueError):
-                    format_markdown(items)
-
+        pushed = format_markdown(items, new={"featured_scp"}, today=date(2026, 9, 30))
         self.assertEqual(
             pushed,
-            "# 头 2026-09-30\n"
-            "## ☣️ 精品原创 SCP 🆕\n**[SCP-CN-1](https://x.invalid/a)**\n> 作者甲\n\n"
-            "## 🎭 主题精品 · 观谬维基\n**[放弃观谬](https://x.invalid/p)**\n"
-            "尾",
+            "# 🚨 SCP-CN 新内容通报\n> 2026-09-30 ｜ 安保 · 收容 · 保护\n\n***\n\n"
+            "## ☣️ 精品原创 SCP\n**[SCP-CN-1](https://x.invalid/a)**\n> *作者* *作者甲*\n\n*“引言”*\n\n"
+            "## 🏆 竞赛与活动\n**[征文](https://x.invalid/c)**\n\n*献给[征文](https://x.invalid/c)！*\n\n"
+            "***\n📡 数据来源：SCP 基金会中文分部首页",
         )
-        self.assertIn("## ☣️ 精品原创 SCP\n**SCP-CN-1**\n", plain)
+        self.assertTrue(format_markdown(items).startswith("# 🗂️ SCP-CN 日报\n"))
+        plain = format_markdown(items, links=False)
+        self.assertNotIn("](", plain)
+        self.assertIn("*献给**征文**！*", plain)
 
     def test_clip_markdown_keeps_links_whole(self):
         text = "开头[链接文字](https://x.invalid/a)结尾"
@@ -238,15 +234,6 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(clip_markdown(text, 4), "开头[链接](https://x.invalid/a)…")
         self.assertEqual(clip_markdown(text, 20, links=False), "开头**链接文字**结尾")
         self.assertEqual(clip_markdown(text, 2), "开头…")
-
-    def test_shipped_templates_render_cleanly(self):
-        items = [_item(key, key) for key in SECTIONS]
-        for new in (None, {"contests"}):
-            markdown = format_markdown(items, new=new)
-            self.assertNotIn("<!--", markdown)
-            self.assertNotRegex(markdown, r"\{\w+\}")
-            self.assertIn("(https://scp-wiki-cn.wikidot.com/contests)", markdown)
-        self.assertEqual(len(build_keyboard(links=False)["content"]["rows"]), 1)
 
     def test_text_and_card(self):
         items = [_item("featured_scp", "scp-cn-1", "<危险>")]
