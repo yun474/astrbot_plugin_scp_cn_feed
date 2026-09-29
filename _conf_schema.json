@@ -1,87 +1,43 @@
 {
-  "poll_interval_days": {
-    "description": "轮询间隔（天）",
-    "type": "int",
-    "default": 1,
-    "hint": "插件会按天轮询 SCP 中文站。代码会强制最小值为 1 天，低于 1 会按 1 天处理。"
+  "push_mode": {
+    "description": "推送形式",
+    "type": "string",
+    "options": ["image", "markdown", "text"],
+    "labels": ["图片卡片", "QQ 官方 Markdown + 按钮", "纯文字"],
+    "default": "image",
+    "hint": "日报和新内容推送都用这个形式。Markdown 只对 QQ 官方机器人（qq_official / qq_official_webhook）的群聊和单聊生效，其他平台自动改用图片卡片；图片渲染失败时改发文字。"
   },
-  "subscription_sessions": {
+  "push_sections": {
+    "description": "推送区块",
+    "type": "list",
+    "options": ["featured_scp", "featured_tale", "featured_library", "featured_theme", "contests"],
+    "labels": ["精品原创 SCP", "精品原创故事", "精品原创图书馆", "主题精品", "竞赛与活动"],
+    "render_type": "checkbox",
+    "default": ["featured_scp", "featured_tale", "contests"],
+    "hint": "勾选要推送和在日报里展示的首页区块，全部不勾等于全选。新勾上的区块会先记下当前内容，下次变化时才推送。"
+  },
+  "subscribed_sessions": {
     "description": "订阅会话",
-    "type": "template_list",
-    "hint": "每项对应一个 event.unified_msg_origin。可在这里新增、删改订阅；聊天指令产生的订阅也会自动写回这里。修改配置并重载插件后生效。",
-    "templates": {
-      "subscription": {
-        "name": "订阅会话",
-        "display_item": "origin",
-        "items": {
-          "origin": {
-            "description": "会话标识",
-            "type": "string",
-            "default": "",
-            "hint": "填写完整的 event.unified_msg_origin，可通过 /scp 状态 查看。"
-          },
-          "featured_scp": {
-            "description": "订阅精品 SCP",
-            "type": "bool",
-            "default": true
-          },
-          "featured_tale": {
-            "description": "订阅精品原创故事",
-            "type": "bool",
-            "default": true
-          },
-          "contests": {
-            "description": "订阅竞赛与活动",
-            "type": "bool",
-            "default": true
-          }
-        }
-      }
-    },
-    "default": []
-  },
-  "whitelist_origins": {
-    "description": "会话白名单",
     "type": "list",
     "default": [],
-    "hint": "填写允许使用和接收推送的 event.unified_msg_origin。留空表示不限制白名单。"
+    "hint": "接收推送的会话 ID（unified_msg_origin）。在会话里发 /scp 订阅 会自动加进来，/scp 状态 能看到当前会话 ID。"
   },
-  "blacklist_origins": {
-    "description": "会话黑名单",
-    "type": "list",
-    "default": [],
-    "hint": "填写禁止使用和接收推送的 event.unified_msg_origin。黑名单优先级高于白名单。"
-  },
-  "enable_daily_report_image": {
-    "description": "日报使用图片卡片",
+  "markdown_links": {
+    "description": "Markdown 附带链接",
     "type": "bool",
     "default": true,
-    "hint": "开启后 /scp 日报 会把抓取结果渲染成 HTML 卡片截图发送；渲染失败时自动回退文本日报。"
+    "hint": "Markdown 模式下标题做成原文超链接，并加一个跳转中文站首页的「SCP基金会」按钮。如果 QQ 开放平台因为链接拒绝发送（日志里会看到 Markdown 推送失败），关掉这项就只保留指令按钮。"
   },
-  "update_push_mode": {
-    "description": "更新推送形式",
-    "type": "string",
-    "options": ["daily_report", "module_screenshot", "text"],
-    "labels": ["整份日报", "新增模块截图", "文字"],
-    "default": "module_screenshot",
-    "hint": "三选一。自动推送和 /scp 检查检测到新增时，发送整份日报、新增来源网页模块截图或纯文字；图片失败时自动回退文字。"
+  "poll_interval_days": {
+    "description": "检查间隔（天）",
+    "type": "int",
+    "default": 1,
+    "hint": "多久抓一次中文站首页，最少 1 天。"
   },
   "playwright_browser_path": {
-    "description": "Playwright 浏览器路径",
+    "description": "浏览器路径",
     "type": "string",
     "default": "",
-    "hint": "可选。留空时插件会优先寻找系统 Edge/Chrome，再尝试 Playwright 自带浏览器。Windows 可填写 msedge.exe 或 chrome.exe 的完整路径。"
-  },
-  "render_timeout_seconds": {
-    "description": "渲染超时时间（秒）",
-    "type": "int",
-    "default": 35,
-    "hint": "Playwright 打开网页和截图的超时时间，最低按 5 秒处理。"
-  },
-  "render_retention_hours": {
-    "description": "渲染图片保留时间（小时）",
-    "type": "int",
-    "default": 72,
-    "hint": "插件会定期清理 data/plugin_data/astrbot_plugin_scp_cn_feed/renders 下超过该时间的旧图片，最低按 1 小时处理。"
+    "hint": "可选。渲染图片卡片用的 Chromium / Edge / Chrome 可执行文件路径；留空时依次尝试 Playwright 自带的 Chromium、系统 Edge、系统 Chrome。"
   }
 }

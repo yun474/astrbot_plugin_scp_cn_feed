@@ -1,11 +1,10 @@
 import asyncio
-import inspect
 import json
 import sys
 import tempfile
 import types
 import unittest
-from xml.etree import ElementTree
+from datetime import date
 from pathlib import Path
 
 
@@ -16,34 +15,8 @@ class _Logger:
 
 class _Filter:
     @staticmethod
-    def on_astrbot_loaded():
+    def command(_name):
         return lambda function: function
-
-    @staticmethod
-    def command_group(_name):
-        def decorator(function):
-            function.command_group_name = _name
-
-            def command(_command):
-                def command_decorator(handler):
-                    handler.command_name = _command
-                    return handler
-
-                return command_decorator
-
-            function.command = command
-            return function
-
-        return decorator
-
-
-class _MessageChain:
-    def __init__(self, components=None):
-        self.components = list(components or [])
-
-    def message(self, value):
-        self.components.append(_Plain(value))
-        return self
 
 
 class _Plain:
@@ -59,393 +32,295 @@ class _Image:
         return image
 
 
-astrbot = types.ModuleType("astrbot")
-api = types.ModuleType("astrbot.api")
-api.AstrBotConfig = dict
-api.logger = _Logger()
-event_api = types.ModuleType("astrbot.api.event")
-event_api.AstrMessageEvent = object
-event_api.MessageChain = _MessageChain
-event_api.filter = _Filter()
-components_api = types.ModuleType("astrbot.api.message_components")
-components_api.Image = _Image
-components_api.Plain = _Plain
-star_api = types.ModuleType("astrbot.api.star")
-star_api.Context = object
-star_api.Star = object
-star_api.StarTools = type("StarTools", (), {"get_data_dir": staticmethod(lambda _name: Path("."))})
-sys.modules.setdefault("astrbot", astrbot)
-sys.modules.setdefault("astrbot.api", api)
-sys.modules.setdefault("astrbot.api.event", event_api)
-sys.modules.setdefault("astrbot.api.message_components", components_api)
-sys.modules.setdefault("astrbot.api.star", star_api)
+class _MessageChain:
+    def __init__(self, components=None):
+        self.components = list(components or [])
 
-try:
-    import httpx  # noqa: F401
-except ImportError:
-    httpx_stub = types.ModuleType("httpx")
-    httpx_stub.AsyncClient = object
-    sys.modules["httpx"] = httpx_stub
+    def message(self, text):
+        self.components.append(_Plain(text))
+        return self
 
-try:
-    import defusedxml  # noqa: F401
-except ImportError:
-    defusedxml_stub = types.ModuleType("defusedxml")
-    defusedxml_stub.DefusedXmlException = ElementTree.ParseError
-    defusedxml_element_tree_stub = types.ModuleType("defusedxml.ElementTree")
-    defusedxml_element_tree_stub.fromstring = ElementTree.fromstring
-    sys.modules["defusedxml"] = defusedxml_stub
-    sys.modules["defusedxml.ElementTree"] = defusedxml_element_tree_stub
+
+def _module(name, **attrs):
+    module = types.ModuleType(name)
+    module.__dict__.update(attrs)
+    sys.modules.setdefault(name, module)
+
+
+_module("astrbot")
+_module("astrbot.api", AstrBotConfig=dict, logger=_Logger())
+_module("astrbot.api.event", AstrMessageEvent=object, MessageChain=_MessageChain, filter=_Filter())
+_module("astrbot.api.message_components", Image=_Image)
+_module("astrbot.api.star", Context=object, Star=object, StarTools=object)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from astrbot_plugin_scp_cn_feed import main as main_module  # noqa: E402
-from astrbot_plugin_scp_cn_feed.main import (  # noqa: E402
-    PUSH_MODE_DAILY_REPORT,
-    PUSH_MODE_MODULE_SCREENSHOT,
-    PUSH_MODE_TEXT,
-    ScpCnFeedPlugin,
+from astrbot_plugin_scp_cn_feed.main import ScpCnFeedPlugin  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.fetcher import parse_homepage  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.messages import (  # noqa: E402
+    build_keyboard,
+    format_markdown,
+    format_text,
 )
-from astrbot_plugin_scp_cn_feed.scp_cn_feed.models import FeedItem, SOURCES  # noqa: E402
-from astrbot_plugin_scp_cn_feed.scp_cn_feed.renderer import (  # noqa: E402
-    FeedRenderer,
-    SCP_FOUNDATION_LOGO_URL,
-)
-from astrbot_plugin_scp_cn_feed.scp_cn_feed.service import FeedService  # noqa: E402
-from astrbot_plugin_scp_cn_feed.scp_cn_feed.storage import FeedStore  # noqa: E402
-from astrbot_plugin_scp_cn_feed.scp_cn_feed.wikidot_api import WikidotApiError  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.models import SECTIONS, FeedItem  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.qq_official import QQOfficialTarget  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.renderer import build_card_html  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.store import AnchorStore  # noqa: E402
+
+
+HOMEPAGE = """
+<div id="page-content">
+  <div class="content-panel centered standalone"><p>站务公告，别点陌生链接。</p></div>
+  <div class="content-panel centered standalone">
+    <p>掌声献给<a href="/summer-contest-2026">幕前</a>与<a href="/summer-contest-2026">2026夏季征文</a>！</p>
+    <p>感谢每一位作者。</p>
+  </div>
+  <div class="summercontest"><a href="https://scp-wiki-cn.wikidot.com/summer-contest-2026">
+    <img src="https://example.invalid/banner.jpg"></a></div>
+  <div class="content-panel left-column">
+    <div class="panel-heading"><p>精品原创SCP</p></div>
+    <div class="panel-body">
+      <div class="feature-title"><p><a href="/scp-cn-4003">SCP-CN-4003：命名混沌</a></p></div>
+      <div class="feature-subtitle"><p>by <span class="printuser"><a href="#">H-Storm Z</a></span></p></div>
+      <p><em>“置身妖野，我沐浴<a href="/x">丁香</a>。”</em></p>
+    </div>
+  </div>
+  <div class="content-panel right-column">
+    <div class="panel-heading"><p>主题精品：观谬维基</p></div>
+    <div class="panel-body">
+      <div class="feature-title"><p><a href="/parawatch">所以我放弃了观谬维基</a></p></div>
+      <div class="feature-subtitle"><p>by Rye Travis</p></div>
+    </div>
+  </div>
+  <div class="news-block content-panel"><div class="panel-body">
+    <div class="news-title"><p>2026年7月26日</p></div>
+    <div class="news-content"><p>
+      <span class="printuser"><a href="https://www.wikidot.com/user:info/a">某人</a></span>解开了<a href="/puzzle">谜题</a>！家具城闭店整改。
+    </p></div>
+  </div></div>
+</div>
+"""
+
+
+def _item(section, uid, title="标题"):
+    return FeedItem(section=section, uid=uid, title=title, url=f"https://scp-wiki-cn.wikidot.com/{uid}")
 
 
 class _Config(dict):
-    def __init__(self, **values):
-        super().__init__(**values)
-        self.save_count = 0
+    saves = 0
 
     def save_config(self):
-        self.save_count += 1
+        self.saves += 1
 
 
-def _plugin(config=None):
+class _Platform:
+    def __init__(self, name="aiocqhttp", platform_id="bot"):
+        self._meta = types.SimpleNamespace(name=name, id=platform_id)
+        self.api = _QQApi()
+
+    def meta(self):
+        return self._meta
+
+    def get_client(self):
+        return types.SimpleNamespace(api=self.api)
+
+
+class _QQApi:
+    def __init__(self):
+        self.calls = []
+
+    async def post_group_message(self, **payload):
+        self.calls.append(("group", payload))
+
+    async def post_c2c_message(self, **payload):
+        self.calls.append(("c2c", payload))
+
+
+class _Context:
+    def __init__(self, *platforms, ok=True):
+        self.platform_manager = types.SimpleNamespace(platform_insts=list(platforms))
+        self.sent = []
+        self.ok = ok
+
+    async def send_message(self, origin, chain):
+        self.sent.append((origin, chain))
+        return self.ok
+
+
+class _Fetcher:
+    def __init__(self, report):
+        self.report = report
+
+    async def fetch(self, fresh=False):
+        return self.report
+
+
+def _plugin(temp_dir, report, context=None, **config):
     plugin = object.__new__(ScpCnFeedPlugin)
-    plugin.config = config if config is not None else _Config()
+    plugin.config = _Config(push_mode="text", **config)
+    plugin.context = context or _Context(_Platform())
+    plugin.store = AnchorStore(Path(temp_dir) / "state.json")
+    plugin.fetcher = _Fetcher(report)
     return plugin
 
 
-class SubscriptionConfigTests(unittest.TestCase):
-    def test_command_group_is_scp_and_subscribe_has_no_source_argument(self):
-        self.assertEqual(ScpCnFeedPlugin.scp.command_group_name, "scp")
-        params = list(inspect.signature(ScpCnFeedPlugin.subscribe).parameters)
-        self.assertEqual(params, ["self", "event"])
-        self.assertEqual(ScpCnFeedPlugin.unsubscribe.command_name, "取消订阅")
-        params = list(inspect.signature(ScpCnFeedPlugin.unsubscribe).parameters)
-        self.assertEqual(params, ["self", "event"])
+class ParseTests(unittest.TestCase):
+    def test_homepage_blocks(self):
+        report = parse_homepage(HOMEPAGE)
 
-    def test_subscribe_defaults_to_all_sources(self):
-        class Event:
-            unified_msg_origin = "group:all"
+        scp = report["featured_scp"]
+        self.assertEqual(scp.item_id, "featured_scp:scp-cn-4003")
+        self.assertEqual(scp.author, "H-Storm Z")
+        self.assertEqual(scp.summary, "“置身妖野，我沐浴丁香。”")
+        self.assertIn('<b class="ref">丁香</b>', scp.summary_html)
 
-            def plain_result(self, text):
-                return text
+        theme = report["featured_theme"]
+        self.assertEqual((theme.tag, theme.author), ("观谬维基", "Rye Travis"))
 
-        class Service:
-            def __init__(self):
-                self.baselined = None
+        contest = report["contests"]
+        self.assertEqual(contest.title, "2026夏季征文")
+        self.assertEqual(contest.image_url, "https://example.invalid/banner.jpg")
+        self.assertEqual(contest.summary, "掌声献给幕前与2026夏季征文！\n感谢每一位作者。")
 
-            async def baseline_sources(self, origin, source_keys):
-                self.baselined = (origin, set(source_keys))
-                return len(source_keys)
+        self.assertNotIn("news", report)
 
-        config = _Config(subscription_sessions=[])
-        plugin = _plugin(config)
+
+class MessageTests(unittest.TestCase):
+    def test_markdown_and_keyboard(self):
+        items = [_item(key, key) for key in SECTIONS]
+        markdown = format_markdown(items, update=True, today=date(2026, 9, 30))
+        self.assertTrue(markdown.startswith("# 🚨 SCP-CN 新内容通报\n> 2026-09-30"))
+        self.assertIn("**[标题](https://scp-wiki-cn.wikidot.com/contests)**", markdown)
+
+        rows = build_keyboard()["content"]["rows"]
+        self.assertEqual([len(row["buttons"]) for row in rows], [1, 4])
+        home = rows[0]["buttons"][0]
+        self.assertEqual(home["render_data"]["label"], "SCP基金会")
+        self.assertEqual((home["action"]["type"], home["action"]["data"]), (0, "https://scp-wiki-cn.wikidot.com/"))
+        command = rows[-1]["buttons"][1]
+        self.assertEqual((command["action"]["type"], command["action"]["data"]), (2, "/scp 订阅"))
+        labels = [button["render_data"]["label"] for row in rows for button in row["buttons"]]
+        self.assertTrue(all(len(label) <= 10 for label in labels))
+
+    def test_markdown_without_links(self):
+        items = [_item("featured_scp", "scp-cn-1")]
+        self.assertNotIn("](", format_markdown(items, update=False, links=False))
+        self.assertEqual(len(build_keyboard(links=False)["content"]["rows"]), 1)
+
+    def test_text_and_card(self):
+        items = [_item("featured_scp", "scp-cn-1", "<危险>")]
+        self.assertIn("https://scp-wiki-cn.wikidot.com/scp-cn-1", format_text(items, update=False))
+        card = build_card_html(items, update=True)
+        self.assertIn("&lt;危险&gt;", card)
+        self.assertIn("NEW", card)
+        self.assertIn("<svg", card)
+
+
+class QQOfficialTests(unittest.TestCase):
+    def test_resolve_targets(self):
+        qq = _Platform("qq_official")
+        group = QQOfficialTarget.resolve(qq, "qq:GroupMessage:user_ABCDEF0123")
+        self.assertEqual((group.scene, group.openid), ("group", "ABCDEF0123"))
+        self.assertEqual(QQOfficialTarget.resolve(qq, "qq:FriendMessage:ABC").scene, "c2c")
+        self.assertIsNone(QQOfficialTarget.resolve(qq, "qq:GroupMessage:123456"))
+        self.assertIsNone(QQOfficialTarget.resolve(_Platform(), "bot:GroupMessage:ABC"))
+
+    def test_passive_markdown_payload(self):
+        qq = _Platform("qq_official")
+        target = QQOfficialTarget.resolve(qq, "qq:GroupMessage:ABC", msg_id="m1")
+        asyncio.run(target.send_markdown("# hi", {"content": {"rows": []}}))
+        scene, payload = qq.api.calls[0]
+        self.assertEqual(scene, "group")
+        self.assertEqual(payload["group_openid"], "ABC")
+        self.assertEqual((payload["msg_type"], payload["msg_id"]), (2, "m1"))
+        self.assertEqual(payload["markdown"], {"content": "# hi"})
+
+
+class PushTests(unittest.TestCase):
+    def test_baseline_then_push_changed_sections_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            plugin.store = FeedStore(Path(temp_dir) / "state.json")
-            plugin.service = Service()
+            report = {"featured_scp": _item("featured_scp", "a"), "contests": _item("contests", "c1")}
+            plugin = _plugin(temp_dir, report, subscribed_sessions=["bot:GroupMessage:1"])
 
-            results = []
+            asyncio.run(plugin.check_updates())
+            self.assertEqual(plugin.context.sent, [])
+            self.assertEqual(plugin.store.anchors("bot:GroupMessage:1")["contests"], "contests:c1")
 
-            async def collect():
-                async for result in plugin.subscribe(Event()):
-                    results.append(result)
+            report["featured_scp"] = _item("featured_scp", "b", "新精品")
+            asyncio.run(plugin.check_updates())
+            self.assertEqual(len(plugin.context.sent), 1)
+            text = plugin.context.sent[0][1].components[0].text
+            self.assertIn("新精品", text)
+            self.assertNotIn("contests", text)
+            self.assertEqual(plugin.store.anchors("bot:GroupMessage:1")["featured_scp"], "featured_scp:b")
 
-            asyncio.run(collect())
-
-            self.assertEqual(
-                plugin.store.all_subscriptions(),
-                {"group:all": {"featured_scp", "featured_tale", "contests"}},
-            )
-            self.assertEqual(
-                plugin.service.baselined,
-                ("group:all", {"featured_scp", "featured_tale", "contests"}),
-            )
-            self.assertEqual(config.save_count, 1)
-            self.assertIn("已订阅：", results[0])
-
-    def test_unsubscribe_defaults_to_all_sources(self):
-        class Event:
-            unified_msg_origin = "group:all"
-
-            def plain_result(self, text):
-                return text
-
-        config = _Config(
-            subscription_sessions=[
-                {
-                    "__template_key": "subscription",
-                    "origin": "group:all",
-                    "featured_scp": True,
-                    "featured_tale": True,
-                    "contests": True,
-                }
-            ]
-        )
-        plugin = _plugin(config)
+    def test_failed_send_keeps_anchor_for_retry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            plugin.store = FeedStore(Path(temp_dir) / "state.json")
-            plugin.store.replace_subscriptions(
-                {"group:all": {"featured_scp", "featured_tale", "contests"}}
+            origin = "bot:GroupMessage:1"
+            plugin = _plugin(
+                temp_dir,
+                {"featured_scp": _item("featured_scp", "b")},
+                context=_Context(_Platform(), ok=False),
+                subscribed_sessions=[origin],
             )
+            plugin.store.update(origin, {"featured_scp": "featured_scp:a"})
+            asyncio.run(plugin.check_updates())
+            self.assertEqual(plugin.store.anchors(origin)["featured_scp"], "featured_scp:a")
 
-            results = []
-
-            async def collect():
-                async for result in plugin.unsubscribe(Event()):
-                    results.append(result)
-
-            asyncio.run(collect())
-
-            self.assertEqual(plugin.store.all_subscriptions(), {})
-            self.assertEqual(config.save_count, 1)
-            self.assertIn("已取消订阅：", results[0])
-
-    def test_command_state_is_written_as_editable_template_entries(self):
-        config = _Config(subscription_sessions=[])
-        plugin = _plugin(config)
+    def test_qq_official_markdown_push_bypasses_astrbot_session_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            plugin.store = FeedStore(Path(temp_dir) / "state.json")
-            plugin.store.replace_subscriptions(
-                {"aiocqhttp:GroupMessage:123": {"featured_scp", "contests"}}
+            origin = "qq:GroupMessage:ABC"
+            qq = _Platform("qq_official", "qq")
+            plugin = _plugin(
+                temp_dir,
+                {"featured_scp": _item("featured_scp", "b")},
+                context=_Context(qq),
+                subscribed_sessions=[origin],
             )
+            plugin.config["push_mode"] = "markdown"
+            plugin.store.update(origin, {"featured_scp": "featured_scp:a"})
+            asyncio.run(plugin.check_updates())
 
-            self.assertTrue(plugin._sync_subscription_config_from_store())
+            self.assertEqual(plugin.context.sent, [])
+            _scene, payload = qq.api.calls[0]
+            self.assertNotIn("msg_id", payload)
+            self.assertIn("keyboard", payload)
+            self.assertEqual(plugin.store.anchors(origin)["featured_scp"], "featured_scp:b")
 
-        self.assertEqual(config.save_count, 1)
-        self.assertEqual(
-            config["subscription_sessions"],
-            [
-                {
-                    "__template_key": "subscription",
-                    "origin": "aiocqhttp:GroupMessage:123",
-                    "featured_scp": True,
-                    "featured_tale": False,
-                    "contests": True,
-                }
-            ],
-        )
 
-    def test_config_edits_replace_state_and_cleanup_removed_anchors(self):
-        config = _Config(
-            subscription_sessions=[
-                {
-                    "__template_key": "subscription",
-                    "origin": "group:2",
-                    "featured_scp": False,
-                    "featured_tale": True,
-                    "contests": False,
-                }
-            ]
-        )
-        plugin = _plugin(config)
+class ConfigTests(unittest.TestCase):
+    def test_subscribe_and_unsubscribe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            plugin.store = FeedStore(Path(temp_dir) / "state.json")
-            plugin.store.replace_subscriptions({"group:1": {"featured_scp"}})
-            plugin.store.mark_latest("group:1", "featured_scp", "featured_scp:old")
+            plugin = _plugin(temp_dir, {"contests": _item("contests", "c1")})
+            self.assertIn("订阅成功", asyncio.run(plugin._subscribe("s:1")))
+            self.assertEqual(plugin.config["subscribed_sessions"], ["s:1"])
+            self.assertEqual(plugin.store.anchors("s:1"), {"contests": "contests:c1"})
 
-            plugin._sync_subscriptions_from_config()
+            self.assertIn("已退订", plugin._unsubscribe("s:1"))
+            self.assertEqual(plugin.config["subscribed_sessions"], [])
+            self.assertEqual(plugin.store.anchors("s:1"), {})
 
-            self.assertEqual(plugin.store.all_subscriptions(), {"group:2": {"featured_tale"}})
-            self.assertIsNone(plugin.store.latest_item_id("group:1", "featured_scp"))
-
-    def test_legacy_state_is_migrated_to_config_once(self):
-        config = _Config(subscription_sessions=[])
-        plugin = _plugin(config)
+    def test_legacy_subscriptions_migrate_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            plugin.store = FeedStore(Path(temp_dir) / "state.json")
-            plugin.store.subscribe("legacy:group", "featured_scp")
-
-            plugin._initialize_subscription_config()
-
-            self.assertTrue(plugin.store.subscription_config_sync_complete())
-            self.assertEqual(config["subscription_sessions"][0]["origin"], "legacy:group")
-            self.assertEqual(config.save_count, 1)
-
-
-class PushModeTests(unittest.TestCase):
-    def test_all_three_push_modes_and_invalid_fallback(self):
-        plugin = _plugin(_Config(update_push_mode=PUSH_MODE_DAILY_REPORT))
-        self.assertEqual(plugin._update_push_mode(), PUSH_MODE_DAILY_REPORT)
-        plugin.config["update_push_mode"] = PUSH_MODE_MODULE_SCREENSHOT
-        self.assertEqual(plugin._update_push_mode(), PUSH_MODE_MODULE_SCREENSHOT)
-        plugin.config["update_push_mode"] = PUSH_MODE_TEXT
-        self.assertEqual(plugin._update_push_mode(), PUSH_MODE_TEXT)
-        plugin.config["update_push_mode"] = "broken"
-        self.assertEqual(plugin._update_push_mode(), PUSH_MODE_MODULE_SCREENSHOT)
-
-    def test_source_fetch_failures_are_isolated(self):
-        plugin = _plugin()
-
-        class Service:
-            async def fetch_source(self, source, limit, use_cache):
-                if source.key == "featured_tale":
-                    raise WikidotApiError("temporary failure")
-                return [
-                    FeedItem(
-                        source_key=source.key,
-                        fullname=f"{source.key}-1",
-                        title=source.title,
-                        url="https://example.invalid/item",
-                    )
-                ]
-
-        plugin.service = Service()
-        fetched, errors = asyncio.run(
-            plugin._fetch_sources_safely(
-                {"featured_scp", "featured_tale"},
-                limit=5,
+            state = Path(temp_dir) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "subscriptions": {"old:GroupMessage:1": ["featured_scp"]},
+                        "latest_by_origin": {"old:GroupMessage:1": {"featured_scp": "featured_scp:x"}},
+                    }
+                ),
+                encoding="utf-8",
             )
-        )
-        self.assertIn("featured_scp", fetched)
-        self.assertNotIn("featured_tale", fetched)
-        self.assertEqual(errors, {"featured_tale": "temporary failure"})
+            store = AnchorStore(state)
+            self.assertEqual(store.pop_legacy_subscriptions(), ["old:GroupMessage:1"])
+            self.assertEqual(AnchorStore(state).pop_legacy_subscriptions(), [])
+            self.assertEqual(store.anchors("old:GroupMessage:1"), {"featured_scp": "featured_scp:x"})
 
-    def test_poll_dispatches_each_selected_push_mode(self):
-        class Client:
-            async def fetch_source(self, source, limit, use_cache):
-                if source.key == "featured_scp":
-                    return [
-                        FeedItem(
-                            source_key=source.key,
-                            fullname="new-item",
-                            title="新增项目",
-                            url="https://example.invalid/new",
-                        ),
-                        FeedItem(
-                            source_key=source.key,
-                            fullname="old-item",
-                            title="旧项目",
-                            url="https://example.invalid/old",
-                        ),
-                    ]
-                return [
-                    FeedItem(
-                        source_key=source.key,
-                        fullname=f"{source.key}-current",
-                        title=source.title,
-                        url=f"https://example.invalid/{source.key}",
-                    )
-                ]
-
-        class Renderer:
-            def prune_old_files(self):
-                pass
-
-            async def render_update_screenshot(self, source, items):
-                return Path(f"{source.key}.png")
-
-        class Context:
-            def __init__(self):
-                self.sent = []
-
-            async def send_message(self, origin, chain):
-                self.sent.append((origin, chain))
-
-        expectations = {
-            PUSH_MODE_DAILY_REPORT: "SCP-CN 日报",
-            PUSH_MODE_MODULE_SCREENSHOT: "SCP-CN 精品 SCP：",
-            PUSH_MODE_TEXT: "[SCP-CN 精品 SCP更新]",
-        }
-        original_interval = main_module.PUSH_SEND_INTERVAL_SECONDS
-        main_module.PUSH_SEND_INTERVAL_SECONDS = 0
-        try:
-            for mode, expected_text in expectations.items():
-                with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp_dir:
-                    config = _Config(
-                        update_push_mode=mode,
-                        enable_daily_report_image=False,
-                        subscription_sessions=[
-                            {
-                                "__template_key": "subscription",
-                                "origin": "group:1",
-                                "featured_scp": True,
-                                "featured_tale": False,
-                                "contests": False,
-                            }
-                        ],
-                    )
-                    plugin = _plugin(config)
-                    plugin.store = FeedStore(Path(temp_dir) / "state.json")
-                    plugin.store.replace_subscriptions({"group:1": {"featured_scp"}})
-                    plugin.store.mark_latest(
-                        "group:1",
-                        "featured_scp",
-                        "featured_scp:old-item",
-                    )
-                    plugin.service = FeedService(plugin.store, Client())
-                    plugin.renderer = Renderer()
-                    plugin.context = Context()
-
-                    asyncio.run(plugin._poll_once())
-
-                    self.assertEqual(len(plugin.context.sent), 1)
-                    _origin, chain = plugin.context.sent[0]
-                    plain_text = "".join(
-                        component.text
-                        for component in chain.components
-                        if isinstance(component, _Plain)
-                    )
-                    self.assertIn(expected_text, plain_text)
-                    self.assertEqual(
-                        plugin.store.latest_item_id("group:1", "featured_scp"),
-                        "featured_scp:new-item",
-                    )
-        finally:
-            main_module.PUSH_SEND_INTERVAL_SECONDS = original_interval
-
-
-class DailyReportRenderTests(unittest.TestCase):
-    def test_daily_html_contains_foundation_logo_and_expected_colors(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            renderer = FeedRenderer(Path(temp_dir))
-            item = FeedItem(
-                source_key="featured_scp",
-                fullname="scp-cn-test",
-                title="测试项目",
-                url="https://scp-wiki-cn.wikidot.com/scp-cn-test",
-                created_by="作者甲",
-                summary="正文链接",
-                summary_html='<span class="summary-link">正文链接</span>',
-            )
-            html_text = renderer._build_daily_html(
-                {"featured_scp": [item], "featured_tale": [], "contests": []},
-                {},
-                ("featured_scp", "featured_tale", "contests"),
-                SOURCES,
-            )
-
-        self.assertIn(SCP_FOUNDATION_LOGO_URL, html_text)
-        self.assertIn(".meta .label", html_text)
-        self.assertIn("color: #2367a5", html_text)
-        self.assertIn(".summary-link", html_text)
-        self.assertIn("color: #b3272d", html_text)
-
-    def test_schema_exposes_subscription_editor_and_exactly_three_push_choices(self):
-        schema = json.loads(
-            (Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(schema["subscription_sessions"]["type"], "template_list")
-        self.assertEqual(
-            schema["update_push_mode"]["options"],
-            [PUSH_MODE_DAILY_REPORT, PUSH_MODE_MODULE_SCREENSHOT, PUSH_MODE_TEXT],
-        )
+    def test_schema_matches_code(self):
+        schema = json.loads((Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(schema["push_mode"]["options"], ["image", "markdown", "text"])
+        self.assertEqual(schema["push_sections"]["options"], list(SECTIONS))
 
 
 if __name__ == "__main__":

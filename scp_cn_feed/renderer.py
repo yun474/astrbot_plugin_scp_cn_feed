@@ -1,631 +1,351 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import os
-import re
 import time
-from contextlib import suppress
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .models import FeedItem, FeedSource, SITE_BASE_URL
+from .messages import clip, headline
+from .models import SECTIONS, FeedItem
 
 
-DEFAULT_VIEWPORT_WIDTH = 980
-DEFAULT_DAILY_HEIGHT = 1280
-DEFAULT_UPDATE_HEIGHT = 900
-DEFAULT_TIMEOUT_SECONDS = 35
-DEFAULT_RETENTION_HOURS = 72
-SCP_FOUNDATION_LOGO_URL = (
-    "https://scp-wiki-cn.wikidot.com/local--files/component:theme/logo.png"
+CARD_WIDTH = 760
+TIMEOUT_MS = 30000
+RETENTION_SECONDS = 2 * 86400
+SUMMARY_LIMIT = 180
+
+# SCP 基金会徽标（CC BY-SA 3.0），线条用 currentColor，方便换色。
+_ARROW = "m64.7 30.6v24h-5.08l8.08 14 8.08-14h-5.08l-.000265-24h-5.99"
+SCP_LOGO_SVG = (
+    '<svg viewBox="0 0 135 135" xmlns="http://www.w3.org/2000/svg">'
+    '<circle cx="67.7" cy="71.5" r="33" fill="none" stroke="currentColor" stroke-width="6"/>'
+    '<path d="m51.9 11.9h31.7l3.07 11.4.944.391c19.4 8.03 32 26.9 32 47.9 0 2.26-.149 4.53-.445 '
+    "6.77l-.133 1.01 8.37 8.37-15.8 27.4-11.4-3.06-.809.623c-9.06 6.95-20.2 10.7-31.6 10.7-11.4 "
+    "6e-5-22.5-3.77-31.6-10.7l-.81-.623-11.4 3.06-15.8-27.4 8.37-8.37-.133-1.01c-.296-2.25-.445-4.51"
+    '-.445-6.77.000141-21 12.6-39.9 32-47.9l.944-.391z" fill="none" stroke="currentColor" stroke-width="4"/>'
+    f'<g fill="currentColor"><path d="{_ARROW}"/>'
+    f'<path d="{_ARROW}" transform="rotate(120 67.7 71.5)"/>'
+    f'<path d="{_ARROW}" transform="rotate(240 67.7 71.5)"/></g>'
+    "</svg>"
 )
 
 
-class FeedRenderError(RuntimeError):
+class RenderError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class RenderOptions:
-    browser_path: str = ""
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
-    retention_hours: int = DEFAULT_RETENTION_HOURS
-
-    @property
-    def timeout_ms(self) -> int:
-        return max(5, self.timeout_seconds) * 1000
-
-
-class FeedRenderer:
-    def __init__(self, output_dir: Path, options: RenderOptions | None = None):
+class CardRenderer:
+    def __init__(self, output_dir: Path, browser_path: str = ""):
         self.output_dir = output_dir
-        self.options = options or RenderOptions()
+        self.browser_path = browser_path.strip()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    async def render_daily_report(
-        self,
-        sections: dict[str, list[FeedItem]],
-        errors: dict[str, str],
-        source_order: tuple[str, ...],
-        sources: dict[str, FeedSource],
-    ) -> Path:
-        html_text = self._build_daily_html(sections, errors, source_order, sources)
-        output_path = self._new_output_path("daily")
+    async def render(self, items: list[FeedItem], *, update: bool) -> Path:
+        page = build_card_html(items, update=update)
+        # 同一天同样的内容只渲染一次，多个会话推送时直接复用。
+        path = self.output_dir / f"scp_cn_{hashlib.sha1(page.encode()).hexdigest()[:16]}.png"
+        if path.exists():
+            return path
+        self._prune()
 
-        async with await self._playwright() as p:
-            browser = await self._launch_browser(p)
-            try:
-                page = await browser.new_page(
-                    viewport={"width": DEFAULT_VIEWPORT_WIDTH, "height": DEFAULT_DAILY_HEIGHT},
-                    device_scale_factor=1,
-                )
-                await page.set_content(html_text, wait_until="load", timeout=self.options.timeout_ms)
-                await self._wait_for_images(page)
-                await page.locator(".report").screenshot(
-                    path=str(output_path),
-                    timeout=self.options.timeout_ms,
-                )
-            finally:
-                await browser.close()
-
-        return output_path
-
-    async def render_update_screenshot(
-        self,
-        source: FeedSource,
-        items: list[FeedItem],
-    ) -> Path:
-        if not items:
-            raise FeedRenderError("没有可截图的更新条目")
-
-        async with await self._playwright() as p:
-            browser = await self._launch_browser(p)
-            try:
-                homepage_path = await self._try_homepage_region_screenshot(browser, source, items)
-                if homepage_path:
-                    return homepage_path
-                return await self._screenshot_item_page(browser, items[0])
-            finally:
-                await browser.close()
-
-    def prune_old_files(self) -> None:
-        max_age_seconds = max(1, self.options.retention_hours) * 3600
-        cutoff = time.time() - max_age_seconds
-        for path in self.output_dir.glob("scp_cn_feed_*.png"):
-            with suppress(OSError):
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
-
-    async def _try_homepage_region_screenshot(
-        self,
-        browser: Any,
-        source: FeedSource,
-        items: list[FeedItem],
-    ) -> Path | None:
-        if not source.homepage_heading and source.key != "contests":
-            return None
-
-        page = await browser.new_page(
-            viewport={"width": 1200, "height": DEFAULT_UPDATE_HEIGHT},
-            device_scale_factor=1,
-        )
-        try:
-            await page.goto(
-                SITE_BASE_URL + "/",
-                wait_until="domcontentloaded",
-                timeout=self.options.timeout_ms,
-            )
-            await self._settle_page(page)
-            await self._hide_noisy_page_parts(page)
-            await self._wait_for_images(page)
-
-            if source.key == "contests":
-                return await self._try_contest_homepage_screenshot(page, source, items)
-
-            locator = self._homepage_region_locator(page, source)
-            if await locator.count() == 0:
-                return None
-
-            target = locator.first
-            if source.key != "contests" and not await self._region_matches_items(target, items):
-                return None
-
-            output_path = self._new_output_path(f"update_{source.key}_home")
-            await target.screenshot(path=str(output_path), timeout=self.options.timeout_ms)
-            return output_path
-        finally:
-            await page.close()
-
-    async def _try_contest_homepage_screenshot(
-        self,
-        page: Any,
-        source: FeedSource,
-        items: list[FeedItem],
-    ) -> Path | None:
-        if not items:
-            return None
-
-        banner = page.locator("div.summercontest")
-        if await banner.count() == 0:
-            return None
-
-        with suppress(Exception):
-            await banner.first.scroll_into_view_if_needed(timeout=5000)
-            await page.wait_for_timeout(800)
-
-        clip = await self._contest_homepage_clip(page, items[0])
-        if not clip:
-            return None
-
-        output_path = self._new_output_path(f"update_{source.key}_home")
-        await page.screenshot(path=str(output_path), clip=clip, timeout=self.options.timeout_ms)
-        return output_path
-
-    async def _contest_homepage_clip(self, page: Any, item: FeedItem) -> dict[str, float] | None:
-        return await page.evaluate(
-            """(itemUrl) => {
-                const pageContent = document.querySelector("#page-content") || document.body;
-                const banner = pageContent.querySelector("div.summercontest") || document.querySelector("div.summercontest");
-                if (!banner) return null;
-
-                const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
-                const isVisible = (element) => {
-                    const rect = element.getBoundingClientRect();
-                    const style = window.getComputedStyle(element);
-                    return rect.width > 1 && rect.height > 1 && style.display !== "none" && style.visibility !== "hidden";
-                };
-                const sameTarget = (href) => {
-                    try {
-                        const target = new URL(itemUrl, window.location.href).pathname.replace(/\\/$/, "");
-                        const current = new URL(href, window.location.href).pathname.replace(/\\/$/, "");
-                        return target && current === target;
-                    } catch {
-                        return false;
-                    }
-                };
-                const containsTargetLink = (element) => {
-                    return Array.from(element.querySelectorAll("a[href]")).some((link) => sameTarget(link.href));
-                };
-                const rectFor = (element) => {
-                    const rect = element.getBoundingClientRect();
-                    return {
-                        left: rect.left + window.scrollX,
-                        top: rect.top + window.scrollY,
-                        right: rect.right + window.scrollX,
-                        bottom: rect.bottom + window.scrollY,
-                        width: rect.width,
-                        height: rect.height,
-                    };
-                };
-
-                const children = Array.from(pageContent.children).filter((element) => {
-                    return !["SCRIPT", "STYLE", "LINK", "META"].includes(element.tagName) && isVisible(element);
-                });
-                let bannerIndex = children.findIndex((element) => element === banner || element.contains(banner));
-                if (bannerIndex < 0) bannerIndex = children.length;
-
-                const previous = children.slice(0, bannerIndex).filter((element) => {
-                    return normalize(element.innerText).length > 0 || element.querySelector("img, a, div");
-                });
-                let summary = previous.slice().reverse().find((element) => containsTargetLink(element));
-                if (!summary) {
-                    summary = previous.slice().reverse().find((element) => {
-                        return element.classList.contains("standalone") || element.classList.contains("content-panel");
-                    });
-                }
-
-                const next = children.slice(Math.min(bannerIndex + 1, children.length)).find((element) => {
-                    if (element === banner || banner.contains(element)) return false;
-                    const rect = element.getBoundingClientRect();
-                    return rect.height > 8 && (normalize(element.innerText) || element.querySelector("img, a, div"));
-                });
-
-                const bannerRect = rectFor(banner);
-                const summaryRect = summary ? rectFor(summary) : bannerRect;
-                const contentRect = rectFor(pageContent);
-                const nextRect = next ? rectFor(next) : null;
-
-                const top = Math.max(0, Math.min(summaryRect.top, bannerRect.top) - 12);
-                const left = Math.max(0, Math.min(summaryRect.left, bannerRect.left, contentRect.left) - 8);
-                const right = Math.min(
-                    document.documentElement.scrollWidth,
-                    Math.max(summaryRect.right, bannerRect.right, contentRect.right) + 8
-                );
-                const naturalBottom = Math.max(summaryRect.bottom, bannerRect.bottom) + 12;
-                const bottom = nextRect ? Math.max(naturalBottom, nextRect.top) : naturalBottom;
-
-                return {
-                    x: left,
-                    y: top,
-                    width: Math.max(1, right - left),
-                    height: Math.max(1, bottom - top),
-                };
-            }""",
-            item.url,
-        )
-
-    async def _screenshot_item_page(self, browser: Any, item: FeedItem) -> Path:
-        page = await browser.new_page(
-            viewport={"width": 1200, "height": DEFAULT_UPDATE_HEIGHT},
-            device_scale_factor=1,
-        )
-        try:
-            await page.goto(item.url, wait_until="domcontentloaded", timeout=self.options.timeout_ms)
-            with suppress(Exception):
-                await page.wait_for_load_state("networkidle", timeout=min(8000, self.options.timeout_ms))
-            await self._settle_page(page)
-            await self._hide_noisy_page_parts(page)
-            await self._wait_for_images(page)
-
-            content = page.locator("#page-content")
-            target = content.first if await content.count() else page.locator("body").first
-            box = await target.bounding_box(timeout=self.options.timeout_ms)
-            if not box:
-                raise FeedRenderError(f"页面区域不可截图：{item.url}")
-
-            output_path = self._new_output_path(f"update_{item.source_key}_page")
-            await page.screenshot(
-                path=str(output_path),
-                clip={
-                    "x": max(0, box["x"]),
-                    "y": max(0, box["y"]),
-                    "width": min(max(1, box["width"]), 1120),
-                    "height": min(max(1, box["height"]), DEFAULT_UPDATE_HEIGHT),
-                },
-                timeout=self.options.timeout_ms,
-            )
-            return output_path
-        finally:
-            await page.close()
-
-    async def _playwright(self) -> Any:
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:
-            raise FeedRenderError("未安装 playwright，无法渲染图片") from exc
-        return async_playwright()
+            raise RenderError("没装 playwright，没法渲染图片") from exc
 
-    async def _launch_browser(self, p: Any) -> Any:
-        launch_kwargs = {
-            "headless": True,
-            "timeout": self.options.timeout_ms,
-        }
+        temp_path = path.with_suffix(".tmp.png")
+        async with async_playwright() as p:
+            browser = await self._launch(p)
+            try:
+                tab = await browser.new_page(
+                    viewport={"width": CARD_WIDTH, "height": 800},
+                    device_scale_factor=2,
+                )
+                await tab.set_content(page, wait_until="load", timeout=TIMEOUT_MS)
+                await tab.locator(".dossier").screenshot(path=str(temp_path), timeout=TIMEOUT_MS)
+            finally:
+                await browser.close()
+        os.replace(temp_path, path)
+        return path
 
-        browser_path = self._browser_path()
-        if browser_path:
-            return await p.chromium.launch(executable_path=browser_path, **launch_kwargs)
+    async def _launch(self, p: Any) -> Any:
+        attempts = [{"executable_path": self.browser_path}] if self.browser_path else []
+        attempts += [{}, {"channel": "msedge"}, {"channel": "chrome"}]
+        error: Exception | None = None
+        for options in attempts:
+            try:
+                return await p.chromium.launch(headless=True, timeout=TIMEOUT_MS, **options)
+            except Exception as exc:
+                error = exc
+        raise RenderError(
+            "启动浏览器失败：请执行 playwright install chromium，或在配置里填写浏览器路径"
+        ) from error
 
-        with suppress(Exception):
-            return await p.chromium.launch(channel="msedge", **launch_kwargs)
-        with suppress(Exception):
-            return await p.chromium.launch(channel="chrome", **launch_kwargs)
-        try:
-            return await p.chromium.launch(**launch_kwargs)
-        except Exception as exc:
-            raise FeedRenderError(
-                "无法启动 Playwright 浏览器，请安装 Chromium 或在配置里填写 playwright_browser_path"
-            ) from exc
+    def _prune(self) -> None:
+        cutoff = time.time() - RETENTION_SECONDS
+        for old in self.output_dir.glob("scp_cn_*.png"):
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
 
-    def _browser_path(self) -> str:
-        configured = self.options.browser_path.strip()
-        if configured and Path(configured).exists():
-            return configured
 
-        for path in _candidate_browser_paths():
-            if Path(path).exists():
-                return path
-        return ""
-
-    def _homepage_region_locator(self, page: Any, source: FeedSource) -> Any:
-        if source.key == "contests":
-            return page.locator("div.summercontest")
-        return page.locator("div.content-panel").filter(has_text=source.homepage_heading or source.title)
-
-    async def _region_matches_items(self, locator: Any, items: list[FeedItem]) -> bool:
-        with suppress(Exception):
-            text = await locator.inner_text(timeout=3000)
-            markers = []
-            for item in items:
-                markers.extend((item.title, item.fullname))
-            return any(marker and marker in text for marker in markers)
-        return False
-
-    async def _settle_page(self, page: Any) -> None:
-        with suppress(Exception):
-            await page.wait_for_timeout(1600)
-
-    async def _wait_for_images(self, page: Any) -> None:
-        with suppress(Exception):
-            await page.wait_for_load_state("networkidle", timeout=min(10000, self.options.timeout_ms))
-        with suppress(Exception):
-            await page.wait_for_function(
-                """() => Array.from(document.images).every((img) => {
-                    if (!img.offsetParent && getComputedStyle(img).display === "none") return true;
-                    return img.complete && img.naturalWidth > 0;
-                })""",
-                timeout=min(10000, self.options.timeout_ms),
-            )
-        with suppress(Exception):
-            await page.wait_for_timeout(1200)
-
-    async def _hide_noisy_page_parts(self, page: Any) -> None:
-        with suppress(Exception):
-            await page.add_style_tag(
-                content="""
-                #navi-bar,
-                #header,
-                #side-bar,
-                #page-options-container,
-                #page-options-bottom,
-                .page-rate-widget-box,
-                .page-watch-options,
-                .licensebox {
-                    display: none !important;
-                }
-                """
-            )
-
-    def _build_daily_html(
-        self,
-        sections: dict[str, list[FeedItem]],
-        errors: dict[str, str],
-        source_order: tuple[str, ...],
-        sources: dict[str, FeedSource],
-    ) -> str:
-        section_html = []
-        for source_key in source_order:
-            source = sources[source_key]
-            items = sections.get(source_key, [])
-            section_title = self._daily_section_title(source, items)
-            cards = "".join(self._daily_card(item, index) for index, item in enumerate(items, start=1))
-            if not cards:
-                message = errors.get(source_key) or "暂无可用内容。"
-                cards = f"<article class='card empty'>{html.escape(message)}</article>"
-            section_html.append(
-                "<section class='section'>"
-                f"<div class='section-title'><span class='mark'></span>{html.escape(section_title)}</div>"
-                f"{cards}"
-                "</section>"
-            )
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        return f"""<!doctype html>
+def build_card_html(items: list[FeedItem], *, update: bool, today: date | None = None) -> str:
+    today = today or date.today()
+    entries = "".join(_entry(item, index, update) for index, item in enumerate(items, start=1))
+    title_en = "NEW CONTENT ALERT" if update else "DAILY BRIEFING"
+    doc_type = "ALERT" if update else "BRIEF"
+    return f"""<!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <style>{DAILY_REPORT_CSS}</style>
-</head>
+<head><meta charset="utf-8"><style>{CARD_CSS}</style></head>
 <body>
-  <main class="report">
-    <header class="header">
-      <div class="brand">
-        <img class="foundation-logo" src="{html.escape(SCP_FOUNDATION_LOGO_URL)}" alt="SCP 基金会 Logo">
-        <div>
-          <div class="kicker">SCP-CN Feed</div>
-          <h1>中文站日报</h1>
-        </div>
-      </div>
-      <div class="date">{today}</div>
-    </header>
-    {''.join(section_html)}
-    <footer class="footer">数据来自 SCP 中文站首页模块，失败时回退 RSS / 标签页。日报卡片由本地 Playwright 渲染。</footer>
-  </main>
+<main class="dossier">
+  <div class="watermark">{SCP_LOGO_SVG}</div>
+  <header class="masthead">
+    <div class="logo">{SCP_LOGO_SVG}</div>
+    <div class="org">
+      <div class="org-en">SCP FOUNDATION · CN BRANCH</div>
+      <div class="org-cn">SCP 基金会中文分部</div>
+      <div class="motto">SECURE · CONTAIN · PROTECT</div>
+    </div>
+    <div class="clearance"><b>LEVEL 1</b><span>公开 / UNRESTRICTED</span></div>
+  </header>
+  <div class="hazard"></div>
+  <section class="docline">
+    <div><span>文档编号</span><b>SCP-CN/{doc_type}/{today:%Y%m%d}</b></div>
+    <div><span>签发日期</span><b>{today:%Y-%m-%d}</b></div>
+    <div><span>收录条目</span><b>{len(items):02d}</b></div>
+  </section>
+  <h1 class="title{' alert' if update else ''}">{headline(update)}<small>{title_en}</small></h1>
+  <div class="entries">{entries}</div>
+  <footer class="footer">
+    <div>安保 · 收容 · 保护</div>
+    <div class="source">数据来源 scp-wiki-cn.wikidot.com ｜ 授权人员 <i></i> 已阅</div>
+  </footer>
+</main>
 </body>
 </html>"""
 
-    def _daily_section_title(self, source: FeedSource, items: list[FeedItem]) -> str:
-        if source.key == "contests":
-            return "竞赛新闻"
-        return source.title
 
-    def _daily_card(self, item: FeedItem, index: int) -> str:
-        meta: list[tuple[str, str]] = []
-        if item.created_by:
-            meta.append(("作者", item.created_by))
-        if item.rating is not None:
-            meta.append(("评分", str(item.rating)))
-        if not meta:
-            meta.append(("来源", "首页模块"))
-
-        summary = self._daily_summary_html(item)
-        title = html.escape(item.title)
-        url = html.escape(item.url)
-        link_label = "竞赛链接" if item.source_key == "contests" else "文章链接"
-        meta_html = "".join(
-            f'<span><span class="label">{html.escape(label)}</span>：{html.escape(value)}</span>'
-            for label, value in meta
-        )
-        return f"""
-<article class="card">
-  <div class="index">{index:02d}</div>
-  <div class="card-body">
-    <h2>{title}</h2>
-    <div class="meta">{meta_html}</div>
-    <p>{summary}</p>
-    <div class="url"><span class="label">{link_label}</span>：{url}</div>
-  </div>
-</article>"""
-
-    def _daily_summary_html(self, item: FeedItem) -> str:
-        limit = 230 if item.source_key != "contests" else 420
-        compact = _compact_text(item.summary or "暂无摘要", limit)
-        if item.summary_html and item.summary and len(" ".join(item.summary.split())) <= limit:
-            return item.summary_html
-        return html.escape(compact)
-
-    def _new_output_path(self, slug: str) -> Path:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", slug).strip("_") or "render"
-        return self.output_dir / f"scp_cn_feed_{timestamp}_{safe_slug}.png"
+def _entry(item: FeedItem, index: int, update: bool) -> str:
+    section = SECTIONS[item.section]
+    esc = html.escape
+    parts = [
+        f'<article class="entry{" fresh" if update else ""}">',
+        '<div class="entry-head">',
+        f'<span class="no">{index:02d}</span>',
+        f'<span class="sec">{esc(section.title)}</span>',
+        f'<span class="en">{esc(section.en)}</span>',
+    ]
+    if item.tag:
+        parts.append(f'<span class="tag">{esc(item.tag)}</span>')
+    parts.append("</div>")
+    if update:
+        parts.append('<div class="stamp">NEW<small>新收录</small></div>')
+    if item.image_url:
+        parts.append(f'<img class="banner" src="{esc(item.image_url)}" onerror="this.remove()">')
+    parts.append(f"<h2>{esc(item.title)}</h2>")
+    if item.author:
+        parts.append(f'<div class="author"><span>作者</span>{esc(item.author)}</div>')
+    if item.summary:
+        parts.append(f'<blockquote class="{item.section}">{_summary_html(item)}</blockquote>')
+    link = item.url.removeprefix("https://")
+    parts.append(f'<div class="url"><span>▸ 档案位置</span>{esc(link)}</div>')
+    parts.append("</article>")
+    return "".join(parts)
 
 
-def _compact_text(value: str, limit: int) -> str:
-    compact = " ".join(value.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[:limit].rstrip() + "..."
+def _summary_html(item: FeedItem) -> str:
+    compact = " ".join(item.summary.split())
+    if item.summary_html and len(compact) <= SUMMARY_LIMIT:
+        return item.summary_html
+    return html.escape(clip(compact, SUMMARY_LIMIT))
 
 
-def _candidate_browser_paths() -> tuple[str, ...]:
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    program_files = os.environ.get("ProgramFiles", "")
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
-    return tuple(
-        path
-        for path in (
-            str(Path(program_files_x86) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
-            str(Path(program_files) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
-            str(Path(local_app_data) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
-            str(Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe"),
-            str(Path(program_files_x86) / "Google" / "Chrome" / "Application" / "chrome.exe"),
-            str(Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe"),
-        )
-        if path and not path.startswith(".")
-    )
-
-
-DAILY_REPORT_CSS = """
-:root { color-scheme: light; }
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  background: #eef1f4;
-  color: #171b1f;
-  font-family: "Microsoft YaHei UI", "Noto Sans CJK SC", "PingFang SC", Arial, sans-serif;
+CARD_CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --ink: #16161a;
+  --paper: #f3efe6;
+  --card: #fffdf8;
+  --line: #d9d1bf;
+  --muted: #7b7263;
+  --red: #a3151b;
+  --sans: "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "WenQuanYi Micro Hei", sans-serif;
+  --serif: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", "Menlo", monospace;
 }
-.report {
-  width: 980px;
-  min-height: 1280px;
-  padding: 44px 48px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.92), rgba(236,240,241,.96)),
-    radial-gradient(circle at 18% 14%, rgba(175, 43, 48, .12), transparent 28%);
-}
-.header {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: 24px;
-  padding-bottom: 22px;
-  border-bottom: 3px solid #20262c;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-.foundation-logo {
-  display: block;
-  width: 88px;
-  height: 88px;
-  object-fit: contain;
-}
-.kicker {
-  color: #2367a5;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 18px;
-}
-h1 {
-  margin: 8px 0 0;
-  font-size: 46px;
-  line-height: 1.05;
-  letter-spacing: 0;
-}
-.date {
-  color: #596864;
-  font-size: 18px;
-}
-.section {
-  margin-top: 32px;
-}
-.section-title {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 25px;
-  font-weight: 800;
-}
-.mark {
-  width: 14px;
-  height: 34px;
-  border-radius: 2px;
-  background: #b3272d;
-}
-.card {
+body { background: var(--paper); color: var(--ink); font-family: var(--sans); }
+.dossier {
   position: relative;
-  display: grid;
-  grid-template-columns: 58px 1fr;
-  gap: 18px;
-  margin-top: 16px;
-  padding: 22px 24px;
-  border: 1px solid #d9dee0;
-  border-left: 6px solid #334f63;
-  border-radius: 8px;
-  background: rgba(255,255,255,.88);
-  box-shadow: 0 10px 26px rgba(22,31,42,.08);
+  width: 760px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(255,255,255,.7), transparent 45%),
+    repeating-linear-gradient(0deg, transparent 0 31px, rgba(22,22,26,.035) 31px 32px),
+    var(--paper);
 }
-.card.empty {
-  display: block;
-  color: #596864;
-  font-size: 18px;
+.watermark {
+  position: absolute;
+  right: -90px;
+  top: 250px;
+  width: 470px;
+  color: var(--ink);
+  opacity: .045;
+  pointer-events: none;
 }
-.index {
-  align-self: start;
-  width: 52px;
-  height: 52px;
-  border: 1px solid #d0d6d8;
-  border-radius: 50%;
-  color: #b3272d;
-  display: grid;
-  place-items: center;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 20px;
-  font-weight: 800;
-}
-h2 {
-  margin: 0 0 10px;
-  font-size: 25px;
-  line-height: 1.28;
-  letter-spacing: 0;
-}
-.meta {
+.masthead {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 12px;
-  color: #2367a5;
-  font-size: 15px;
+  align-items: center;
+  gap: 18px;
+  padding: 26px 32px 24px;
+  background: linear-gradient(180deg, #1d1d22, #0e0e11);
+  color: #f5f2ea;
 }
-.meta .label {
-  color: inherit;
+.logo { width: 76px; height: 76px; color: #f5f2ea; flex: none; }
+.org { flex: 1; }
+.org-en { font: 700 12px/1 var(--mono); letter-spacing: .28em; color: #a9a397; }
+.org-cn { margin-top: 8px; font-size: 30px; font-weight: 900; letter-spacing: .06em; }
+.motto { margin-top: 8px; font: 600 11px/1 var(--mono); letter-spacing: .42em; color: #e0474d; }
+.clearance {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px solid #4a4640;
+  border-left: 4px solid var(--red);
 }
-p {
-  margin: 0;
-  color: #283235;
-  font-size: 18px;
-  line-height: 1.72;
+.clearance b { font: 800 20px/1 var(--mono); letter-spacing: .12em; }
+.clearance span { font-size: 11px; color: #a9a397; letter-spacing: .1em; }
+.hazard {
+  height: 10px;
+  background: repeating-linear-gradient(-45deg, var(--red) 0 14px, #0e0e11 14px 28px);
 }
+.docline {
+  display: flex;
+  justify-content: space-between;
+  margin: 20px 32px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #b9b09c;
+  font-family: var(--mono);
+}
+.docline div { display: flex; flex-direction: column; gap: 5px; }
+.docline span { font-size: 11px; color: var(--muted); letter-spacing: .12em; }
+.docline b { font-size: 15px; letter-spacing: .04em; }
+.title {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 22px 32px 4px;
+  font-size: 38px;
+  font-weight: 900;
+  letter-spacing: .08em;
+}
+.title::before {
+  content: "";
+  align-self: stretch;
+  width: 8px;
+  background: var(--ink);
+}
+.title.alert::before { background: var(--red); }
+.title small { font: 700 13px/1 var(--mono); letter-spacing: .3em; color: var(--red); }
+.entries { position: relative; padding: 14px 32px 8px; }
+.entry {
+  position: relative;
+  margin-bottom: 18px;
+  padding: 0 24px 18px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--ink);
+  box-shadow: 0 1px 0 #fff inset, 0 10px 24px -18px rgba(22,22,26,.55);
+}
+.entry.fresh { border-left-color: var(--red); }
+.entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 -24px 16px;
+  padding: 9px 24px;
+  background: #ece6d8;
+  border-bottom: 1px solid var(--line);
+}
+.entry-head .no {
+  padding: 3px 7px;
+  background: var(--ink);
+  color: #f5f2ea;
+  font: 800 13px/1 var(--mono);
+}
+.entry.fresh .entry-head .no { background: var(--red); }
+.entry-head .sec { font-size: 16px; font-weight: 800; letter-spacing: .06em; }
+.entry-head .en { font: 600 11px/1 var(--mono); letter-spacing: .2em; color: var(--muted); }
+.entry-head .tag {
+  margin-left: auto;
+  padding: 3px 9px;
+  border: 1px solid var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+.stamp {
+  position: absolute;
+  top: 46px;
+  right: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 5px 12px 4px;
+  border: 3px double var(--red);
+  border-radius: 4px;
+  color: var(--red);
+  font: 900 22px/1 var(--mono);
+  letter-spacing: .2em;
+  transform: rotate(-9deg);
+  opacity: .82;
+}
+.stamp small { margin-top: 3px; font: 800 10px/1 var(--sans); letter-spacing: .3em; }
+.banner { display: block; width: 100%; margin-bottom: 14px; border: 1px solid var(--line); }
+h2 { font-size: 25px; line-height: 1.35; font-weight: 900; letter-spacing: .02em; }
+.fresh h2 { padding-right: 96px; }
+.author { margin-top: 8px; font-size: 14px; color: #3f3a33; }
+.author span {
+  margin-right: 8px;
+  padding: 1px 6px;
+  background: var(--ink);
+  color: #f5f2ea;
+  font-size: 11px;
+  letter-spacing: .15em;
+}
+blockquote {
+  margin-top: 14px;
+  padding: 12px 18px;
+  background: #f7f3ea;
+  border-left: 3px solid #c9bea7;
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.8;
+  color: #2d2924;
+}
+blockquote.contests { font-family: var(--sans); font-size: 15px; }
+.ref { color: var(--red); font-weight: 800; }
 .url {
   margin-top: 14px;
-  color: #506579;
-  font-size: 14px;
+  font: 12px/1.4 var(--mono);
+  color: var(--muted);
   word-break: break-all;
 }
-.label {
-  color: #b3272d;
-  font-weight: 800;
-}
-.summary-link {
-  color: #b3272d;
-  font-weight: 800;
-}
+.url span { margin-right: 10px; color: var(--ink); font-weight: 700; font-family: var(--sans); }
 .footer {
-  margin-top: 34px;
-  padding-top: 18px;
-  border-top: 1px solid #cbd2d5;
-  color: #6d7775;
-  font-size: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 14px;
+  padding: 16px 32px;
+  background: #0e0e11;
+  color: #d8d2c4;
+  font-size: 13px;
+  letter-spacing: .3em;
 }
+.footer .source { font: 11px/1 var(--mono); letter-spacing: .04em; color: #8f887b; }
+.footer i { display: inline-block; width: 46px; height: 11px; margin: 0 4px; background: #d8d2c4; vertical-align: -1px; }
 """
