@@ -23,6 +23,7 @@ class FeedItem:
     author: str | None = None
     summary: str | None = None
     summary_html: str | None = None
+    summary_md: str | None = None
     tag: str | None = None
     image_url: str | None = None
 

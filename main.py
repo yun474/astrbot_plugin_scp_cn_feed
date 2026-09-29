@@ -83,18 +83,19 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(f"中文站没抓下来：{exc}")
             return
 
-        items = [report[key] for key in self._sections() if key in report]
+        items = [report[key] for key in self._sections("report_sections") if key in report]
         links = self._markdown_links()
-        markdown = format_markdown(items, update=False, links=links)
+        markdown = format_markdown(items, links=links)
         if await self._reply_markdown(event, markdown, build_keyboard(links=links)):
             return
-        if image := await self._render(items, update=False):
+        image = await self._render(items) if self._mode("report_mode") != "text" else None
+        if image:
             yield event.image_result(str(image))
         else:
-            yield event.plain_result(format_text(items, update=False))
+            yield event.plain_result(format_text(items))
 
     async def _subscribe(self, origin: str) -> str:
-        sections = "、".join(SECTIONS[key].title for key in self._sections())
+        sections = self._section_names("push_sections")
         sessions = self._sessions()
         if origin in sessions:
             return f"本会话早就订阅啦\n推送区块：{sections}"
@@ -121,14 +122,15 @@ class ScpCnFeedPlugin(Star):
         subscribed = "已订阅" if origin in self._sessions() else "未订阅"
         return (
             f"SCP-CN 推送状态：{subscribed}\n"
-            f"推送区块：{'、'.join(SECTIONS[key].title for key in self._sections())}\n"
-            f"推送形式：{MODE_LABELS[self._mode()]}，每 {self._interval_days()} 天检查一次\n"
+            f"日报：{MODE_LABELS[self._mode('report_mode')]} · {self._section_names('report_sections')}\n"
+            f"推送：{MODE_LABELS[self._mode('push_mode')]} · {self._section_names('push_sections')}\n"
+            f"每 {self._interval_days()} 天检查一次\n"
             f"会话 ID：{origin}"
         )
 
     async def _reply_markdown(self, event: AstrMessageEvent, content: str, keyboard: dict) -> bool:
-        """Markdown 模式下给 QQ 官方会话被动回复，成功返回 True。"""
-        if self._mode() != "markdown":
+        """日报形式选了 Markdown 时，给 QQ 官方会话被动回复，成功返回 True。"""
+        if self._mode("report_mode") != "markdown":
             return False
         origin = event.unified_msg_origin
         target = QQOfficialTarget.resolve(self._platform(origin), origin, event.message_obj.message_id)
@@ -160,53 +162,54 @@ class ScpCnFeedPlugin(Star):
             return
 
         report = await self.fetcher.fetch(fresh=True)
-        current = {key: report[key] for key in self._sections() if key in report}
+        latest = {key: item.item_id for key, item in report.items()}
+        shown = [report[key] for key in self._sections("push_sections") if key in report]
         for origin in sessions:
             anchors = self.store.anchors(origin)
-            fresh = [item for key, item in current.items() if key in anchors and anchors[key] != item.item_id]
-            # 新勾选的区块或新会话没有记录，先记下当前内容，不推旧内容。
-            self.store.update(origin, {key: item.item_id for key, item in current.items() if key not in anchors})
-            if not fresh:
-                continue
-            try:
-                sent = await self._push(origin, fresh)
-            except Exception as exc:
-                logger.warning(f"[SCP-CN] 推送到 {origin} 失败，下次检查会重试：{exc}")
-                continue
-            if sent:
-                self.store.update(origin, {item.section: item.item_id for item in fresh})
-            await asyncio.sleep(PUSH_INTERVAL_SECONDS)
+            # 首页区块基本一起换，勾选区块里有一个换了就推一次；没记录过的区块不算新。
+            new = {item.section for item in shown if anchors.get(item.section, item.item_id) != item.item_id}
+            if new:
+                try:
+                    sent = await self._push(origin, shown, new)
+                except Exception as exc:
+                    logger.warning(f"[SCP-CN] 推送到 {origin} 失败：{exc}")
+                    sent = False
+                if not sent:
+                    continue  # 不记已读，下次检查重试
+                await asyncio.sleep(PUSH_INTERVAL_SECONDS)
+            # 没勾选的区块也记下，之后再勾上时不会被当成新内容。
+            self.store.update(origin, latest)
 
-    async def _push(self, origin: str, items: list[FeedItem]) -> bool:
-        mode = self._mode()
+    async def _push(self, origin: str, items: list[FeedItem], new: set[str]) -> bool:
+        mode = self._mode("push_mode")
         target = QQOfficialTarget.resolve(self._platform(origin), origin)
         if target and mode == "markdown":
             links = self._markdown_links()
             try:
                 await target.send_markdown(
-                    format_markdown(items, update=True, links=links),
+                    format_markdown(items, new=new, links=links),
                     build_keyboard(links=links),
                 )
                 return True
             except Exception as exc:
                 logger.warning(f"[SCP-CN] Markdown 推送失败，改发图片卡片：{exc}")
 
-        image = await self._render(items, update=True) if mode != "text" else None
+        image = await self._render(items, new) if mode != "text" else None
         if target:
             if image:
                 await target.send_image(image)
             else:
-                await target.send_markdown(format_text(items, update=True))
+                await target.send_markdown(format_text(items, new=new))
             return True
 
         chain = MessageChain([Image.fromFileSystem(str(image))]) if image else MessageChain().message(
-            format_text(items, update=True)
+            format_text(items, new=new)
         )
         return bool(await self.context.send_message(origin, chain))
 
-    async def _render(self, items: list[FeedItem], *, update: bool) -> Path | None:
+    async def _render(self, items: list[FeedItem], new: set[str] | None = None) -> Path | None:
         try:
-            return await self.renderer.render(items, update=update)
+            return await self.renderer.render(items, new=new)
         except Exception as exc:
             logger.warning(f"[SCP-CN] 卡片渲染失败，改发文字：{exc}")
             return None
@@ -227,12 +230,15 @@ class ScpCnFeedPlugin(Star):
         self.config["subscribed_sessions"] = list(dict.fromkeys(sessions))
         self.config.save_config()
 
-    def _sections(self) -> list[str]:
-        chosen = set(self.config.get("push_sections") or SECTIONS)
-        return [key for key in SECTIONS if key in chosen]
+    def _sections(self, key: str) -> list[str]:
+        chosen = set(self.config.get(key) or SECTIONS)
+        return [section for section in SECTIONS if section in chosen]
 
-    def _mode(self) -> str:
-        mode = self.config.get("push_mode", "image")
+    def _section_names(self, key: str) -> str:
+        return "、".join(SECTIONS[section].title for section in self._sections(key))
+
+    def _mode(self, key: str) -> str:
+        mode = self.config.get(key, "image")
         return mode if mode in MODE_LABELS else "image"
 
     def _markdown_links(self) -> bool:

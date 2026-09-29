@@ -43,8 +43,8 @@ class CardRenderer:
         self.browser_path = browser_path.strip()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    async def render(self, items: list[FeedItem], *, update: bool) -> Path:
-        page = build_card_html(items, update=update)
+    async def render(self, items: list[FeedItem], *, new: set[str] | None = None) -> Path:
+        page = build_card_html(items, new=new)
         # 同一天同样的内容只渲染一次，多个会话推送时直接复用。
         path = self.output_dir / f"scp_cn_{hashlib.sha1(page.encode()).hexdigest()[:16]}.png"
         if path.exists():
@@ -91,9 +91,12 @@ class CardRenderer:
                 old.unlink(missing_ok=True)
 
 
-def build_card_html(items: list[FeedItem], *, update: bool, today: date | None = None) -> str:
+def build_card_html(items: list[FeedItem], *, new: set[str] | None = None, today: date | None = None) -> str:
+    update = new is not None
     today = today or date.today()
-    entries = "".join(_entry(item, index, update) for index, item in enumerate(items, start=1))
+    entries = "".join(
+        _entry(item, index, fresh=update and item.section in new) for index, item in enumerate(items, start=1)
+    )
     title_en = "NEW CONTENT ALERT" if update else "DAILY BRIEFING"
     doc_type = "ALERT" if update else "BRIEF"
     return f"""<!doctype html>
@@ -117,7 +120,7 @@ def build_card_html(items: list[FeedItem], *, update: bool, today: date | None =
     <div><span>签发日期</span><b>{today:%Y-%m-%d}</b></div>
     <div><span>收录条目</span><b>{len(items):02d}</b></div>
   </section>
-  <h1 class="title{' alert' if update else ''}">{headline(update)}<small>{title_en}</small></h1>
+  <h1 class="title{' alert' if update else ''}">{headline(new)}<small>{title_en}</small></h1>
   <div class="entries">{entries}</div>
   <footer class="footer">
     <div>安保 · 收容 · 保护</div>
@@ -128,11 +131,11 @@ def build_card_html(items: list[FeedItem], *, update: bool, today: date | None =
 </html>"""
 
 
-def _entry(item: FeedItem, index: int, update: bool) -> str:
+def _entry(item: FeedItem, index: int, *, fresh: bool) -> str:
     section = SECTIONS[item.section]
     esc = html.escape
     parts = [
-        f'<article class="entry{" fresh" if update else ""}">',
+        f'<article class="entry{" fresh" if fresh else ""}">',
         '<div class="entry-head">',
         f'<span class="no">{index:02d}</span>',
         f'<span class="sec">{esc(section.title)}</span>',
@@ -141,7 +144,7 @@ def _entry(item: FeedItem, index: int, update: bool) -> str:
     if item.tag:
         parts.append(f'<span class="tag">{esc(item.tag)}</span>')
     parts.append("</div>")
-    if update:
+    if fresh:
         parts.append('<div class="stamp">NEW<small>新收录</small></div>')
     if item.image_url:
         parts.append(f'<img class="banner" src="{esc(item.image_url)}" onerror="this.remove()">')

@@ -102,7 +102,8 @@ def _feature_item(panel: Tag, key: str, heading: str) -> FeedItem | None:
         url=url,
         author=author or None,
         summary="\n".join(_text(quote) for quote in quotes) or None,
-        summary_html="<br>".join(_inline_html(quote) for quote in quotes) or None,
+        summary_html="<br>".join(_inline(quote) for quote in quotes) or None,
+        summary_md=" ".join(_inline(quote, markdown=True) for quote in quotes) or None,
         tag=theme or None,
     )
 
@@ -132,7 +133,8 @@ def _contest_item(content: Tag) -> FeedItem | None:
         title=max(names, key=len, default="") or slug.replace("-", " ").title(),
         url=url,
         summary="\n".join(_text(p) for p in paragraphs) or None,
-        summary_html="<br>".join(_inline_html(p) for p in paragraphs) or None,
+        summary_html="<br>".join(_inline(p) for p in paragraphs) or None,
+        summary_md=" ".join(_inline(p, markdown=True) for p in paragraphs) or None,
         image_url=_absolute(image["src"]) if image else None,
     )
 
@@ -141,22 +143,29 @@ def _text(node: Tag | None) -> str:
     return " ".join(node.get_text().split()) if node else ""
 
 
-def _inline_html(node: Tag) -> str:
-    """保留换行与链接高亮的精简 HTML，其余标签只取文字。"""
+def _inline(node: Tag, *, markdown: bool = False) -> str:
+    """段落转成卡片用的精简 HTML，或 QQ 用的 Markdown；链接和用户名单独标出来，其余只取文字。"""
     parts: list[str] = []
     for child in node.children:
         if isinstance(child, Comment):
             continue
         if isinstance(child, NavigableString):
-            parts.append(html.escape(str(child)))
+            parts.append(str(child) if markdown else html.escape(str(child)))
         elif child.name == "br":
-            parts.append("<br>")
+            parts.append(" " if markdown else "<br>")
         elif child.name == "a" or "printuser" in child.get("class", []):
             if text := _text(child):
-                parts.append(f'<b class="ref">{html.escape(text)}</b>')
+                parts.append(_markdown_link(child, text) if markdown else f'<b class="ref">{html.escape(text)}</b>')
         else:
-            parts.append(_inline_html(child))
+            parts.append(_inline(child, markdown=markdown))
     return " ".join("".join(parts).split())
+
+
+def _markdown_link(node: Tag, text: str) -> str:
+    anchors = [node] if node.name == "a" else node.select("a[href]")
+    href = anchors[-1].get("href") if anchors else None
+    label = text.replace("[", "［").replace("]", "］")
+    return f"[{label}]({_absolute(href)})" if href else label
 
 
 def _absolute(href: str) -> str:

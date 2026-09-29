@@ -1,20 +1,37 @@
 {
+  "report_mode": {
+    "description": "日报形式",
+    "type": "string",
+    "options": ["image", "markdown", "text"],
+    "labels": ["图片卡片", "QQ 官方 Markdown + 按钮", "纯文字"],
+    "default": "image",
+    "hint": "/scp 日报 用的形式；选 Markdown 时订阅、状态这些指令回复也会带按钮。Markdown 只对 QQ 官方机器人（qq_official / qq_official_webhook）的群聊和单聊生效，其他平台自动改用图片卡片；图片渲染失败时改发文字。"
+  },
+  "report_sections": {
+    "description": "日报展示区块",
+    "type": "list",
+    "options": ["featured_scp", "featured_tale", "featured_library", "featured_theme", "contests"],
+    "labels": ["精品原创 SCP", "精品原创故事", "精品原创图书馆", "主题精品", "竞赛与活动"],
+    "render_type": "checkbox",
+    "default": ["featured_scp", "featured_tale", "contests"],
+    "hint": "日报里展示哪些首页区块，全部不勾等于全选。"
+  },
   "push_mode": {
     "description": "推送形式",
     "type": "string",
     "options": ["image", "markdown", "text"],
     "labels": ["图片卡片", "QQ 官方 Markdown + 按钮", "纯文字"],
     "default": "image",
-    "hint": "日报和新内容推送都用这个形式。Markdown 只对 QQ 官方机器人（qq_official / qq_official_webhook）的群聊和单聊生效，其他平台自动改用图片卡片；图片渲染失败时改发文字。"
+    "hint": "首页有新内容时推送用的形式。Markdown 只对 QQ 官方机器人的群聊和单聊生效，其他平台自动改用图片卡片；图片渲染失败时改发文字。"
   },
   "push_sections": {
-    "description": "推送区块",
+    "description": "推送展示区块",
     "type": "list",
     "options": ["featured_scp", "featured_tale", "featured_library", "featured_theme", "contests"],
     "labels": ["精品原创 SCP", "精品原创故事", "精品原创图书馆", "主题精品", "竞赛与活动"],
     "render_type": "checkbox",
     "default": ["featured_scp", "featured_tale", "contests"],
-    "hint": "勾选要推送和在日报里展示的首页区块，全部不勾等于全选。新勾上的区块会先记下当前内容，下次变化时才推送。"
+    "hint": "推送里展示哪些首页区块，全部不勾等于全选。首页这几个区块一般一起更新，勾选的区块里只要有一个换了内容就推送一次，消息里列出全部勾选区块，换了的标 NEW。"
   },
   "subscribed_sessions": {
     "description": "订阅会话",

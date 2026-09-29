@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 from datetime import date
+from unittest import mock
 from pathlib import Path
 
 
@@ -56,9 +57,11 @@ _module("astrbot.api.star", Context=object, Star=object, StarTools=object)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from astrbot_plugin_scp_cn_feed.main import ScpCnFeedPlugin  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed import messages  # noqa: E402
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.fetcher import parse_homepage  # noqa: E402
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.messages import (  # noqa: E402
     build_keyboard,
+    clip_markdown,
     format_markdown,
     format_text,
 )
@@ -157,7 +160,7 @@ class _Fetcher:
 
 def _plugin(temp_dir, report, context=None, **config):
     plugin = object.__new__(ScpCnFeedPlugin)
-    plugin.config = _Config(push_mode="text", **config)
+    plugin.config = _Config(report_mode="text", push_mode="text", **config)
     plugin.context = context or _Context(_Platform())
     plugin.store = AnchorStore(Path(temp_dir) / "state.json")
     plugin.fetcher = _Fetcher(report)
@@ -181,17 +184,17 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(contest.title, "2026夏季征文")
         self.assertEqual(contest.image_url, "https://example.invalid/banner.jpg")
         self.assertEqual(contest.summary, "掌声献给幕前与2026夏季征文！\n感谢每一位作者。")
+        self.assertEqual(
+            contest.summary_md,
+            "掌声献给[幕前](https://scp-wiki-cn.wikidot.com/summer-contest-2026)"
+            "与[2026夏季征文](https://scp-wiki-cn.wikidot.com/summer-contest-2026)！ 感谢每一位作者。",
+        )
 
         self.assertNotIn("news", report)
 
 
 class MessageTests(unittest.TestCase):
-    def test_markdown_and_keyboard(self):
-        items = [_item(key, key) for key in SECTIONS]
-        markdown = format_markdown(items, update=True, today=date(2026, 9, 30))
-        self.assertTrue(markdown.startswith("# 🚨 SCP-CN 新内容通报\n> 2026-09-30"))
-        self.assertIn("**[标题](https://scp-wiki-cn.wikidot.com/contests)**", markdown)
-
+    def test_keyboard(self):
         rows = build_keyboard()["content"]["rows"]
         self.assertEqual([len(row["buttons"]) for row in rows], [1, 4])
         home = rows[0]["buttons"][0]
@@ -202,18 +205,58 @@ class MessageTests(unittest.TestCase):
         labels = [button["render_data"]["label"] for row in rows for button in row["buttons"]]
         self.assertTrue(all(len(label) <= 10 for label in labels))
 
-    def test_markdown_without_links(self):
-        items = [_item("featured_scp", "scp-cn-1")]
-        self.assertNotIn("](", format_markdown(items, update=False, links=False))
+    def test_markdown_template_filling(self):
+        template = (
+            "<!-- 说明里的 {date} 不会发出去 -->\n# 头 {date}\n"
+            "<!-- 区块开始 -->\n## {icon} {section} {new}\n**{link}**\n> {author}\n<!-- 区块结束 -->\n尾\n"
+        )
+        items = [
+            FeedItem("featured_scp", "a", "SCP-CN-1", "https://x.invalid/a", author="作者甲"),
+            FeedItem("featured_theme", "p", "放弃观谬", "https://x.invalid/p", tag="观谬维基"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "push.md").write_text(template, encoding="utf-8")
+            (Path(temp_dir) / "report.md").write_text("没有区块标记", encoding="utf-8")
+            with mock.patch.object(messages, "TEMPLATE_DIR", Path(temp_dir)):
+                pushed = format_markdown(items, new={"featured_scp"}, today=date(2026, 9, 30))
+                plain = format_markdown(items[:1], new=set(), links=False, today=date(2026, 9, 30))
+                with self.assertRaises(ValueError):
+                    format_markdown(items)
+
+        self.assertEqual(
+            pushed,
+            "# 头 2026-09-30\n"
+            "## ☣️ 精品原创 SCP 🆕\n**[SCP-CN-1](https://x.invalid/a)**\n> 作者甲\n\n"
+            "## 🎭 主题精品 · 观谬维基\n**[放弃观谬](https://x.invalid/p)**\n"
+            "尾",
+        )
+        self.assertIn("## ☣️ 精品原创 SCP\n**SCP-CN-1**\n", plain)
+
+    def test_clip_markdown_keeps_links_whole(self):
+        text = "开头[链接文字](https://x.invalid/a)结尾"
+        self.assertEqual(clip_markdown(text, 20), text)
+        self.assertEqual(clip_markdown(text, 4), "开头[链接](https://x.invalid/a)…")
+        self.assertEqual(clip_markdown(text, 20, links=False), "开头**链接文字**结尾")
+        self.assertEqual(clip_markdown(text, 2), "开头…")
+
+    def test_shipped_templates_render_cleanly(self):
+        items = [_item(key, key) for key in SECTIONS]
+        for new in (None, {"contests"}):
+            markdown = format_markdown(items, new=new)
+            self.assertNotIn("<!--", markdown)
+            self.assertNotRegex(markdown, r"\{\w+\}")
+            self.assertIn("(https://scp-wiki-cn.wikidot.com/contests)", markdown)
         self.assertEqual(len(build_keyboard(links=False)["content"]["rows"]), 1)
 
     def test_text_and_card(self):
         items = [_item("featured_scp", "scp-cn-1", "<危险>")]
-        self.assertIn("https://scp-wiki-cn.wikidot.com/scp-cn-1", format_text(items, update=False))
-        card = build_card_html(items, update=True)
+        self.assertIn("https://scp-wiki-cn.wikidot.com/scp-cn-1", format_text(items))
+        card = build_card_html(items, new={"featured_scp"})
         self.assertIn("&lt;危险&gt;", card)
-        self.assertIn("NEW", card)
+        self.assertIn('class="stamp"', card)
         self.assertIn("<svg", card)
+        self.assertNotIn('class="stamp"', build_card_html(items, new=set()))
+        self.assertIn("DAILY BRIEFING", build_card_html(items))
 
 
 class QQOfficialTests(unittest.TestCase):
@@ -237,22 +280,39 @@ class QQOfficialTests(unittest.TestCase):
 
 
 class PushTests(unittest.TestCase):
-    def test_baseline_then_push_changed_sections_only(self):
+    def test_push_shows_selected_sections_and_marks_changed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            report = {"featured_scp": _item("featured_scp", "a"), "contests": _item("contests", "c1")}
-            plugin = _plugin(temp_dir, report, subscribed_sessions=["bot:GroupMessage:1"])
+            origin = "bot:GroupMessage:1"
+            report = {
+                "featured_scp": _item("featured_scp", "a"),
+                "featured_tale": _item("featured_tale", "t1", "旧故事"),
+                "contests": _item("contests", "c1"),
+            }
+            plugin = _plugin(
+                temp_dir,
+                report,
+                subscribed_sessions=[origin],
+                push_sections=["featured_scp", "featured_tale"],
+            )
 
             asyncio.run(plugin.check_updates())
             self.assertEqual(plugin.context.sent, [])
-            self.assertEqual(plugin.store.anchors("bot:GroupMessage:1")["contests"], "contests:c1")
+            self.assertEqual(plugin.store.anchors(origin)["contests"], "contests:c1")
+
+            # 没勾选的区块换了内容不推送，但会记下来。
+            report["contests"] = _item("contests", "c2")
+            asyncio.run(plugin.check_updates())
+            self.assertEqual(plugin.context.sent, [])
+            self.assertEqual(plugin.store.anchors(origin)["contests"], "contests:c2")
 
             report["featured_scp"] = _item("featured_scp", "b", "新精品")
             asyncio.run(plugin.check_updates())
             self.assertEqual(len(plugin.context.sent), 1)
             text = plugin.context.sent[0][1].components[0].text
-            self.assertIn("新精品", text)
-            self.assertNotIn("contests", text)
-            self.assertEqual(plugin.store.anchors("bot:GroupMessage:1")["featured_scp"], "featured_scp:b")
+            self.assertIn("☣️ 精品原创 SCP 🆕\n新精品", text)
+            self.assertIn("📖 精品原创故事\n旧故事", text)
+            self.assertNotIn("竞赛与活动", text)
+            self.assertEqual(plugin.store.anchors(origin)["featured_scp"], "featured_scp:b")
 
     def test_failed_send_keeps_anchor_for_retry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -288,6 +348,27 @@ class PushTests(unittest.TestCase):
             self.assertEqual(plugin.store.anchors(origin)["featured_scp"], "featured_scp:b")
 
 
+class ReportTests(unittest.TestCase):
+    def test_report_uses_its_own_settings(self):
+        class Event:
+            unified_msg_origin = "bot:GroupMessage:1"
+
+            def plain_result(self, text):
+                return text
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = {"featured_scp": _item("featured_scp", "a", "精品"), "contests": _item("contests", "c", "征文")}
+            plugin = _plugin(temp_dir, report, report_sections=["contests"], push_sections=["featured_scp"])
+
+            async def collect():
+                return [result async for result in plugin._reply_report(Event())]
+
+            (text,) = asyncio.run(collect())
+            self.assertIn("SCP-CN 日报", text)
+            self.assertIn("征文", text)
+            self.assertNotIn("精品", text)
+
+
 class ConfigTests(unittest.TestCase):
     def test_subscribe_and_unsubscribe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,8 +400,9 @@ class ConfigTests(unittest.TestCase):
 
     def test_schema_matches_code(self):
         schema = json.loads((Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8"))
-        self.assertEqual(schema["push_mode"]["options"], ["image", "markdown", "text"])
-        self.assertEqual(schema["push_sections"]["options"], list(SECTIONS))
+        for prefix in ("report", "push"):
+            self.assertEqual(schema[f"{prefix}_mode"]["options"], ["image", "markdown", "text"])
+            self.assertEqual(schema[f"{prefix}_sections"]["options"], list(SECTIONS))
 
 
 if __name__ == "__main__":
