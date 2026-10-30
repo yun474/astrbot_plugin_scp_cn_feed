@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from .scp_cn_feed.messages import (
     format_text,
 )
 from .scp_cn_feed.models import SECTIONS, FeedItem
-from .scp_cn_feed.qq_official import QQOfficialTarget
+from .scp_cn_feed.qq_official import DeliveryUncertain, QQOfficialTarget
 from .scp_cn_feed.renderer import CardRenderer
 from .scp_cn_feed.store import AnchorStore
 
@@ -62,6 +63,8 @@ class ScpCnFeedPlugin(Star):
             return
 
         origin = event.unified_msg_origin
+        if event.get_group_id():
+            origin = f"{event.get_platform_id()}:GroupMessage:{event.get_group_id()}"
         if action == "订阅":
             reply = await self._subscribe(origin)
         elif action == "退订":
@@ -95,6 +98,7 @@ class ScpCnFeedPlugin(Star):
             yield event.plain_result(format_text(items))
 
     async def _subscribe(self, origin: str) -> str:
+        origin = self._canonical_origin(origin)
         sections = self._section_names("push_sections")
         sessions = self._sessions()
         if origin in sessions:
@@ -110,6 +114,7 @@ class ScpCnFeedPlugin(Star):
         return f"订阅成功，首页有新内容会推到这里\n推送区块：{sections}"
 
     def _unsubscribe(self, origin: str) -> str:
+        origin = self._canonical_origin(origin)
         sessions = self._sessions()
         if origin not in sessions:
             return "本会话还没订阅哦"
@@ -119,6 +124,7 @@ class ScpCnFeedPlugin(Star):
         return "已退订，不会再往这里推送了"
 
     def _status(self, origin: str) -> str:
+        origin = self._canonical_origin(origin)
         subscribed = "已订阅" if origin in self._sessions() else "未订阅"
         return (
             f"SCP-CN 推送状态：{subscribed}\n"
@@ -138,6 +144,10 @@ class ScpCnFeedPlugin(Star):
             return False
         try:
             await target.send_markdown(content, keyboard)
+        except DeliveryUncertain as exc:
+            logger.warning(f"[SCP-CN] {exc}；本次不追加回复，避免重复消息")
+            event.stop_event()
+            return True
         except Exception as exc:
             logger.warning(f"[SCP-CN] Markdown 回复失败，改用普通消息：{exc}")
             return False
@@ -183,6 +193,9 @@ class ScpCnFeedPlugin(Star):
     async def _push(self, origin: str, items: list[FeedItem], new: set[str]) -> bool:
         mode = self._mode("push_mode")
         target = QQOfficialTarget.resolve(self._platform(origin), origin)
+        if target:
+            key = "|".join(sorted(item.item_id for item in items))
+            target = replace(target, delivery_key=key)
         if target and mode == "markdown":
             links = self._markdown_links()
             try:
@@ -191,6 +204,8 @@ class ScpCnFeedPlugin(Star):
                     build_keyboard(links=links),
                 )
                 return True
+            except DeliveryUncertain:
+                return False
             except Exception as exc:
                 logger.warning(f"[SCP-CN] Markdown 推送失败，改发图片卡片：{exc}")
 
@@ -199,7 +214,7 @@ class ScpCnFeedPlugin(Star):
             if image:
                 await target.send_image(image)
             else:
-                await target.send_markdown(format_text(items, new=new))
+                await target.send_text(format_text(items, new=new))
             return True
 
         chain = MessageChain([Image.fromFileSystem(str(image))]) if image else MessageChain().message(
@@ -223,8 +238,28 @@ class ScpCnFeedPlugin(Star):
             None,
         )
 
+    def _canonical_origin(self, origin: str) -> str:
+        parts = origin.split(":", 2)
+        platform = self._platform(origin)
+        if len(parts) == 3 and parts[1] == "GroupMessage" and platform is not None:
+            if platform.meta().name in {"qq_official", "qq_official_webhook"}:
+                # QQ 群 OpenID 不含下划线，隔离会话后缀是真实群标识。
+                return f"{parts[0]}:GroupMessage:{parts[2].rsplit('_', 1)[-1]}"
+        return origin
+
     def _sessions(self) -> list[str]:
-        return [str(s).strip() for s in self.config.get("subscribed_sessions", []) if str(s).strip()]
+        raw = [
+            str(s).strip()
+            for s in self.config.get("subscribed_sessions", [])
+            if str(s).strip()
+        ]
+        mapping = {origin: self._canonical_origin(origin) for origin in raw}
+        sessions = list(dict.fromkeys(mapping.values()))
+        if raw != sessions:
+            # 先保存合并后的已读记录，再改配置；中断后重试仍能找到原记录。
+            self.store.merge_origins(mapping)
+            self._set_sessions(sessions)
+        return sessions
 
     def _set_sessions(self, sessions: list[str]) -> None:
         self.config["subscribed_sessions"] = list(dict.fromkeys(sessions))

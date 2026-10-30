@@ -6,6 +6,7 @@ import types
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 
 class _Logger:
@@ -64,7 +65,10 @@ from astrbot_plugin_scp_cn_feed.scp_cn_feed.messages import (  # noqa: E402
     format_text,
 )
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.models import SECTIONS, FeedItem  # noqa: E402
-from astrbot_plugin_scp_cn_feed.scp_cn_feed.qq_official import QQOfficialTarget  # noqa: E402
+from astrbot_plugin_scp_cn_feed.scp_cn_feed.qq_official import (
+    DeliveryUncertain,
+    QQOfficialTarget,
+)  # noqa: E402
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.renderer import build_card_html  # noqa: E402
 from astrbot_plugin_scp_cn_feed.scp_cn_feed.store import AnchorStore  # noqa: E402
 
@@ -132,9 +136,11 @@ class _QQApi:
 
     async def post_group_message(self, **payload):
         self.calls.append(("group", payload))
+        return {"id": "sent"}
 
     async def post_c2c_message(self, **payload):
         self.calls.append(("c2c", payload))
+        return {"id": "sent"}
 
 
 class _Context:
@@ -390,6 +396,120 @@ class ConfigTests(unittest.TestCase):
         for prefix in ("report", "push"):
             self.assertEqual(schema[f"{prefix}_mode"]["options"], ["image", "markdown", "text"])
             self.assertEqual(schema[f"{prefix}_sections"]["options"], list(SECTIONS))
+
+
+class DeliveryRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.qq = _Platform("qq_official", "qq")
+        self.origin = "qq:GroupMessage:GROUP"
+        self.plugin = _plugin(
+            self.temp.name,
+            {"featured_scp": _item("featured_scp", "new")},
+            context=_Context(self.qq),
+            subscribed_sessions=[self.origin],
+        )
+        self.plugin.store.update(self.origin, {"featured_scp": "featured_scp:old"})
+        patcher = patch("astrbot_plugin_scp_cn_feed.main.PUSH_INTERVAL_SECONDS", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_unknown_send_retains_anchor_and_does_not_fallback(self):
+        self.plugin.config["push_mode"] = "markdown"
+        self.qq.api.post_group_message = AsyncMock(return_value=None)
+        self.plugin._render = AsyncMock()
+        await self.plugin.check_updates()
+        await self.plugin.check_updates()
+        self.assertEqual(
+            self.plugin.store.anchors(self.origin)["featured_scp"], "featured_scp:old"
+        )
+        self.plugin._render.assert_not_awaited()
+        calls = self.qq.api.post_group_message.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].kwargs["msg_seq"], calls[1].kwargs["msg_seq"])
+        self.qq.api.post_group_message.return_value = {"id": "confirmed"}
+        await self.plugin.check_updates()
+        self.assertEqual(
+            self.plugin.store.anchors(self.origin)["featured_scp"], "featured_scp:new"
+        )
+
+    async def test_text_and_render_failure_use_plain_payload(self):
+        for mode in ("text", "image"):
+            self.plugin.config["push_mode"] = mode
+            self.plugin._render = AsyncMock(return_value=None)
+            await self.plugin._push(
+                self.origin, list(self.plugin.fetcher.report.values()), {"featured_scp"}
+            )
+            payload = self.qq.api.calls[-1][1]
+            self.assertEqual(payload["msg_type"], 0)
+            self.assertIn("content", payload)
+            self.assertNotIn("markdown", payload)
+
+    async def test_unknown_passive_reply_stops_without_second_message(self):
+        self.plugin.config["report_mode"] = "markdown"
+        self.qq.api.post_group_message = AsyncMock(return_value=None)
+        event = types.SimpleNamespace(
+            unified_msg_origin=self.origin,
+            message_obj=types.SimpleNamespace(message_id="incoming"),
+            stop_event=lambda: None,
+        )
+        self.assertTrue(await self.plugin._reply_markdown(event, "content", {}))
+        self.qq.api.post_group_message.assert_awaited_once()
+
+    async def test_sdk_malformed_responses_are_not_success(self):
+        for scene in ("group", "c2c"):
+            target = QQOfficialTarget(self.qq.api, scene, "TARGET")
+            method = "post_group_message" if scene == "group" else "post_c2c_message"
+            for result in (None, {}, {"message": "error"}):
+                with patch.object(self.qq.api, method, AsyncMock(return_value=result)):
+                    with self.assertRaises(DeliveryUncertain):
+                        await target.send_text("test")
+
+    async def test_existing_isolated_subscriptions_merge_and_push_once(self):
+        aliases = ["qq:GroupMessage:A_GROUP", "qq:GroupMessage:B_GROUP"]
+        self.plugin.config["subscribed_sessions"] = aliases
+        for origin in aliases:
+            self.plugin.store.update(origin, {"featured_scp": "featured_scp:old"})
+        await self.plugin.check_updates()
+        self.assertEqual(self.plugin.config["subscribed_sessions"], [self.origin])
+        self.assertEqual(len(self.qq.api.calls), 1)
+        self.assertEqual(self.qq.api.calls[0][1]["group_openid"], "GROUP")
+        self.assertEqual(self.plugin.store.anchors(aliases[0]), {})
+        self.assertIn("已退订", self.plugin._unsubscribe(aliases[1]))
+        self.assertEqual(self.plugin._sessions(), [])
+
+    async def test_new_isolated_subscription_does_not_reset_existing_anchor(self):
+        self.assertIn(
+            "早就订阅", await self.plugin._subscribe("qq:GroupMessage:A_GROUP")
+        )
+        self.assertEqual(
+            self.plugin.store.anchors(self.origin)["featured_scp"], "featured_scp:old"
+        )
+
+    async def test_conflicting_legacy_anchors_retry_once(self):
+        a, b = "qq:GroupMessage:A_GROUP", "qq:GroupMessage:B_GROUP"
+        self.plugin.config["subscribed_sessions"] = [a, b]
+        self.plugin.store.update(a, {"featured_scp": "featured_scp:old"})
+        self.plugin.store.update(b, {"featured_scp": "featured_scp:new"})
+        await self.plugin.check_updates()
+        await self.plugin.check_updates()
+        self.assertEqual(len(self.qq.api.calls), 1)
+
+    async def test_other_platform_and_private_sessions_remain_separate(self):
+        other = _Platform("qq_official_webhook", "qq2")
+        self.plugin.context.platform_manager.platform_insts.append(other)
+        values = [
+            self.origin,
+            "qq2:GroupMessage:USER_GROUP",
+            "qq:FriendMessage:USER_A",
+            "bot:GroupMessage:USER_A",
+        ]
+        self.plugin.config["subscribed_sessions"] = values
+        self.assertEqual(
+            self.plugin._sessions(),
+            [self.origin, "qq2:GroupMessage:GROUP", values[2], values[3]],
+        )
 
 
 if __name__ == "__main__":
