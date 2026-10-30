@@ -25,6 +25,24 @@ class AnchorStore:
             self._anchors.setdefault(origin, {}).update(anchors)
             self._save()
 
+    def merge_origins(self, mapping: dict[str, str]) -> None:
+        grouped: dict[str, dict[str, set[str]]] = {}
+        for source, target in mapping.items():
+            for origin in {source, target}:
+                for section, item_id in self.anchors(origin).items():
+                    grouped.setdefault(target, {}).setdefault(section, set()).add(
+                        item_id
+                    )
+        for target, sections in grouped.items():
+            # 旧记录冲突时保守保留待推送状态，每个群仍只发送一次。
+            self._anchors[target] = {
+                section: next(iter(values))
+                if len(values) == 1
+                else "__migration_pending__"
+                for section, values in sections.items()
+            }
+        self._save()
+
     def keep_only(self, origins: set[str]) -> None:
         stale = set(self._anchors) - origins
         for origin in stale:

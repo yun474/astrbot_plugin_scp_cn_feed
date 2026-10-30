@@ -7,13 +7,20 @@ AstrBot 的 qq_official 适配器只在内存里记住群场景和最近的 msg_
 from __future__ import annotations
 
 import base64
-import random
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aiohttp import ClientConnectionError
+
 
 QQ_OFFICIAL_ADAPTERS = {"qq_official", "qq_official_webhook"}
+
+
+class DeliveryUncertain(RuntimeError):
+    """接口未确认送达，不能直接改发另一条消息。"""
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,7 @@ class QQOfficialTarget:
     scene: str
     openid: str
     msg_id: str | None = None
+    delivery_key: str = ""
 
     @classmethod
     def resolve(cls, platform: Any, origin: str, msg_id: str | None = None) -> QQOfficialTarget | None:
@@ -42,6 +50,9 @@ class QQOfficialTarget:
             payload["keyboard"] = keyboard
         await self._post(payload)
 
+    async def send_text(self, content: str) -> None:
+        await self._post({"msg_type": 0, "content": content})
+
     async def send_image(self, path: Path) -> None:
         from botpy.http import Route
 
@@ -60,10 +71,29 @@ class QQOfficialTarget:
         await self._post({"msg_type": 7, "media": {"file_info": media["file_info"]}})
 
     async def _post(self, payload: dict[str, Any]) -> None:
-        payload["msg_seq"] = random.randint(1, 2**31 - 1)
+        # 同一内容重试沿用序号，结果不明时不分配新序号。
+        identity = self.delivery_key or json.dumps(
+            payload, sort_keys=True, ensure_ascii=False
+        )
+        digest = hashlib.sha256(
+            f"{self.scene}:{self.openid}:{identity}:{payload['msg_type']}".encode()
+        ).digest()
+        payload["msg_seq"] = int.from_bytes(digest[:4], "big") % (2**31 - 1) + 1
         if self.msg_id:
             payload["msg_id"] = self.msg_id
-        if self.scene == "group":
-            await self.api.post_group_message(group_openid=self.openid, **payload)
-        else:
-            await self.api.post_c2c_message(openid=self.openid, **payload)
+        try:
+            if self.scene == "group":
+                result = await self.api.post_group_message(
+                    group_openid=self.openid, **payload
+                )
+            else:
+                result = await self.api.post_c2c_message(openid=self.openid, **payload)
+        except (TimeoutError, ConnectionError, ClientConnectionError) as exc:
+            raise DeliveryUncertain("QQ 发送结果未确认，保留未读状态") from exc
+        message_id = (
+            result.get("id")
+            if isinstance(result, dict)
+            else getattr(result, "id", None)
+        )
+        if not message_id:
+            raise DeliveryUncertain("QQ 未返回消息 ID，保留未读状态")
